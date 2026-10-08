@@ -3,6 +3,7 @@
 //! Environment: `SHOTTY_CONFIG=<file>` uses another config file,
 //! `SHOTTY_DEMO=area` opens the selection overlay right after start (for testing).
 
+mod clip;
 mod config;
 mod editor;
 mod hotkeys;
@@ -504,14 +505,12 @@ fn record_action(action: RecordAction, cx: &mut App) {
 }
 
 /// A finished recording: on the clipboard as a file, then into the clip window.
-fn recorded(path: std::path::PathBuf, _cx: &mut App) {
+fn recorded(path: std::path::PathBuf, cx: &mut App) {
     log::info!("recording saved: {}", path.display());
     if std::env::var_os("SHOTTY_DEMO").is_none() {
         native::copy_files_to_clipboard(std::slice::from_ref(&path));
     }
-    if std::env::var_os("SHOTTY_DEMO").is_none() {
-        let _ = std::process::Command::new("open").arg("-R").arg(&path).spawn();
-    }
+    clip::open(path, cx);
 }
 
 fn main() {
@@ -526,6 +525,7 @@ fn main() {
         apply_theme(None, cx);
         cx.set_activation_policy(ActivationPolicy::Accessory);
         editor::bind_keys(cx);
+        clip::bind_keys(cx);
 
         let config = Config::load();
         let h = &config.hotkeys;
