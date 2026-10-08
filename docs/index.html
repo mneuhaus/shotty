@@ -1,0 +1,460 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shotty · screenshots and screen recordings for the Mac menu bar</title>
+<meta name="description" content="Shotty is a free, open-source capture tool for macOS: freeze the screen, select, annotate, record, trim and share. Written in Rust with GPUI.">
+<meta property="og:title" content="Shotty">
+<meta property="og:description" content="Screenshots and screen recordings from the macOS menu bar. Freeze, select, annotate, record, trim, share.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://mneuhaus.github.io/shotty/">
+<meta property="og:image" content="https://mneuhaus.github.io/shotty/assets/annotated.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" type="image/png" href="icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@600;700&family=IBM+Plex+Mono:wght@400;500&family=Instrument+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --desk: #e7eaf0;
+    --desk-deep: #d9dde6;
+    --paper: #ffffff;
+    --ink: #15171c;
+    --muted: #5d6270;
+    --veil: rgba(18, 20, 26, 0.6);
+    --red: #ff3b30;
+    --marker: #ffcc00;
+    --blue: #0a84ff;
+    --display: "Barlow Semi Condensed", "Arial Narrow", sans-serif;
+    --body: "Instrument Sans", -apple-system, BlinkMacSystemFont, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; background: var(--desk); color: var(--ink); font: 17px/1.6 var(--body); }
+  img { max-width: 100%; height: auto; display: block; }
+  a { color: inherit; }
+  :focus-visible { outline: 3px solid var(--marker); outline-offset: 3px; border-radius: 4px; }
+
+  /* ---------- Hero: the page is the selection overlay ---------- */
+  .stage {
+    position: relative;
+    min-height: 94vh;
+    overflow: hidden;
+    cursor: crosshair;
+    display: grid;
+    place-items: center;
+    padding: 96px 20px 120px;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: pan-y;
+  }
+  /* The "desktop" behind the veil: a few quiet windows. */
+  .desk-window {
+    position: absolute;
+    background: var(--paper);
+    border-radius: 12px;
+    box-shadow: 0 18px 40px rgba(20, 30, 50, 0.12), 0 0 0 1px rgba(20, 30, 50, 0.06);
+  }
+  .desk-window::before {
+    content: "";
+    position: absolute;
+    left: 14px;
+    top: 13px;
+    width: 46px;
+    height: 10px;
+    background: radial-gradient(circle at 5px 5px, #ff5f57 4.5px, transparent 5px),
+      radial-gradient(circle at 23px 5px, #febc2e 4.5px, transparent 5px),
+      radial-gradient(circle at 41px 5px, #28c840 4.5px, transparent 5px);
+  }
+  .desk-window::after {
+    content: "";
+    position: absolute;
+    left: 24px;
+    right: 24px;
+    top: 52px;
+    bottom: 24px;
+    background: repeating-linear-gradient(to bottom, #eef0f4 0 8px, transparent 8px 28px);
+    border-radius: 3px;
+  }
+  .w1 { left: 4%; top: 12%; width: 34vw; height: 46vh; }
+  .w2 { right: 6%; top: 8%; width: 30vw; height: 34vh; }
+  .w3 { left: 26%; bottom: -6%; width: 46vw; height: 38vh; }
+
+  .marquee {
+    position: absolute;
+    z-index: 2;
+    outline: 1px solid rgba(255, 255, 255, 0.95);
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35), 0 0 0 200vmax var(--veil);
+    pointer-events: none;
+  }
+  .marquee.animate { transition: left 0.45s cubic-bezier(.2, .8, .2, 1), top 0.45s cubic-bezier(.2, .8, .2, 1), width 0.45s cubic-bezier(.2, .8, .2, 1), height 0.45s cubic-bezier(.2, .8, .2, 1); }
+
+  .pill {
+    position: absolute;
+    z-index: 4;
+    padding: 3px 8px;
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.74);
+    color: #fff;
+    font: 500 12px/1.4 var(--mono);
+    white-space: nowrap;
+    pointer-events: none;
+  }
+  .hint { left: 50%; bottom: 26px; transform: translateX(-50%); font-family: var(--body); font-size: 12.5px; padding: 5px 11px; }
+  .cross-h, .cross-v { position: absolute; z-index: 3; background: rgba(255, 255, 255, 0.55); pointer-events: none; display: none; }
+  .cross-h { left: 0; right: 0; height: 1px; }
+  .cross-v { top: 0; bottom: 0; width: 1px; }
+  .stage.pointing .cross-h, .stage.pointing .cross-v, .stage.pointing .coords { display: block; }
+  .stage.dragging .cross-h, .stage.dragging .cross-v, .stage.dragging .coords { display: none; }
+  .coords { display: none; }
+
+  .hero {
+    position: relative;
+    z-index: 1;
+    background: var(--desk);
+    border-radius: 2px;
+    width: min(760px, 100%);
+    text-align: left;
+    padding: 40px clamp(20px, 5vw, 56px) 44px;
+  }
+  .brand { display: flex; align-items: center; gap: 12px; margin-bottom: 28px; font: 700 22px/1 var(--display); letter-spacing: 0.01em; }
+  .brand img { width: 44px; height: 44px; }
+  h1 {
+    margin: 0 0 18px;
+    font: 700 clamp(44px, 7.4vw, 84px)/0.95 var(--display);
+    letter-spacing: -0.01em;
+  }
+  h1 .mark { background: linear-gradient(transparent 58%, rgba(255, 204, 0, 0.55) 58% 92%, transparent 92%); padding: 0 2px; }
+  .lede { margin: 0 0 30px; max-width: 34em; color: var(--muted); font-size: clamp(17px, 2vw, 19px); }
+  .actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+  .button {
+    display: inline-flex; align-items: center; gap: 9px;
+    padding: 12px 18px; border-radius: 10px;
+    font: 600 15px/1 var(--body); text-decoration: none; cursor: pointer;
+  }
+  .button.primary { background: var(--ink); color: #fff; }
+  .button.primary:hover { background: #2a2d35; }
+  .button.quiet { color: var(--ink); box-shadow: inset 0 0 0 1.5px rgba(21, 23, 28, 0.22); }
+  .button.quiet:hover { box-shadow: inset 0 0 0 1.5px var(--ink); }
+  .meta { margin-left: 4px; font: 400 13px/1.4 var(--mono); color: var(--muted); }
+
+  /* ---------- Content ---------- */
+  main { position: relative; z-index: 5; background: var(--desk); }
+  section { padding: clamp(64px, 9vw, 112px) 20px; }
+  .wrap { width: min(1080px, 100%); margin: 0 auto; }
+  h2 { margin: 0 0 14px; font: 700 clamp(34px, 4.6vw, 52px)/1 var(--display); letter-spacing: -0.005em; }
+  .intro { margin: 0 0 44px; max-width: 38em; color: var(--muted); font-size: 18px; }
+  kbd {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 30px; height: 30px; padding: 0 8px;
+    border-radius: 7px; background: var(--paper);
+    box-shadow: inset 0 -2px 0 var(--desk-deep), 0 0 0 1px rgba(21, 23, 28, 0.14);
+    font: 500 14px/1 var(--mono); color: var(--ink);
+  }
+
+  .keys { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+  .key-card { background: var(--paper); border-radius: 16px; padding: 26px 24px 24px; box-shadow: 0 0 0 1px rgba(21, 23, 28, 0.07); }
+  .keycap {
+    display: inline-flex; gap: 6px; margin-bottom: 20px;
+  }
+  .keycap kbd { height: 46px; min-width: 46px; font-size: 20px; border-radius: 10px; box-shadow: inset 0 -3px 0 var(--desk-deep), 0 0 0 1px rgba(21, 23, 28, 0.16); }
+  .key-card h3 { margin: 0 0 8px; font: 700 26px/1.05 var(--display); }
+  .key-card p { margin: 0; color: var(--muted); font-size: 16px; }
+
+  .editor { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 44px; align-items: start; }
+  .shot { border-radius: 14px; overflow: hidden; box-shadow: 0 30px 60px rgba(20, 30, 50, 0.16), 0 0 0 1px rgba(20, 30, 50, 0.08); background: var(--paper); }
+  .caption { margin: 12px 2px 0; font: 400 13px/1.5 var(--mono); color: var(--muted); }
+  .tools { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+  .tools li { display: grid; grid-template-columns: 38px 1fr; gap: 12px; align-items: center; font-size: 16px; }
+  .tools .note { color: var(--muted); font-size: 14px; }
+  .chords { margin-top: 26px; padding-top: 22px; border-top: 1px solid rgba(21, 23, 28, 0.12); display: grid; gap: 9px; font-size: 15px; }
+  .chords div { display: flex; align-items: center; gap: 10px; }
+
+  .flow { list-style: none; margin: 0 0 56px; padding: 0; display: grid; grid-template-columns: repeat(4, 1fr); gap: 18px; counter-reset: step; }
+  .flow li { position: relative; padding-top: 50px; }
+  .flow li::before {
+    counter-increment: step; content: counter(step);
+    position: absolute; left: 0; top: 0; width: 34px; height: 34px; border-radius: 50%;
+    display: grid; place-items: center; background: var(--red); color: #fff;
+    box-shadow: 0 0 0 2.5px #fff, 0 2px 6px rgba(0, 0, 0, 0.18);
+    font: 700 18px/1 var(--display);
+  }
+  .flow h3 { margin: 0 0 6px; font: 700 22px/1.1 var(--display); }
+  .flow p { margin: 0; color: var(--muted); font-size: 15.5px; }
+
+  .sizes { background: var(--paper); border-radius: 16px; padding: 28px clamp(18px, 3vw, 32px); box-shadow: 0 0 0 1px rgba(21, 23, 28, 0.07); }
+  .sizes h3 { margin: 0 0 4px; font: 700 24px/1.1 var(--display); }
+  .sizes .sub { margin: 0 0 22px; color: var(--muted); font-size: 14.5px; }
+  .bar-row { display: grid; grid-template-columns: 200px 1fr 70px; gap: 14px; align-items: center; padding: 7px 0; font-size: 15px; }
+  .bar-row .track { height: 14px; background: #f0f2f6; border-radius: 4px; overflow: hidden; }
+  .bar-row .fill { height: 100%; background: #c3c8d2; border-radius: 4px; }
+  .bar-row.best .fill { background: var(--marker); }
+  .bar-row .mb { font: 500 14px/1 var(--mono); text-align: right; }
+  .bar-row small { display: block; color: var(--muted); font-size: 12.5px; line-height: 1.3; }
+
+  .share { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 44px; align-items: center; }
+  .link-chip {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    background: var(--paper); border-radius: 14px; padding: 18px 20px;
+    box-shadow: 0 0 0 1px rgba(21, 23, 28, 0.08), 0 20px 40px rgba(20, 30, 50, 0.1);
+    font: 400 14px/1.4 var(--mono); word-break: break-all;
+  }
+  .link-chip .ok { flex: none; font-family: var(--body); font-weight: 600; font-size: 13px; color: #1c7c3a; background: #e3f6e8; padding: 4px 9px; border-radius: 999px; }
+  .facts { list-style: none; padding: 0; margin: 22px 0 0; display: grid; gap: 10px; color: var(--muted); font-size: 15.5px; }
+  .facts b { color: var(--ink); font-weight: 600; }
+
+  .install pre {
+    margin: 0; padding: 22px 24px; border-radius: 14px; overflow-x: auto;
+    background: var(--ink); color: #e9ebf0; font: 400 14.5px/1.75 var(--mono);
+  }
+  .install pre .c { color: #8a909c; }
+  .reqs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin-top: 26px; }
+  .reqs div { font-size: 15px; color: var(--muted); }
+  .reqs b { display: block; color: var(--ink); font-weight: 600; margin-bottom: 2px; }
+  .notice { margin-top: 26px; padding: 16px 18px; border-radius: 12px; background: rgba(255, 204, 0, 0.22); font-size: 15px; }
+
+  footer { padding: 40px 20px 56px; color: var(--muted); font-size: 14px; }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: 10px 24px; justify-content: space-between; border-top: 1px solid rgba(21, 23, 28, 0.12); padding-top: 26px; }
+
+  @media (max-width: 860px) {
+    .keys, .flow, .reqs { grid-template-columns: 1fr 1fr; }
+    .editor, .share { grid-template-columns: 1fr; }
+    .bar-row { grid-template-columns: 130px 1fr 60px; }
+  }
+  @media (max-width: 560px) {
+    .keys, .flow, .reqs { grid-template-columns: 1fr; }
+    .hint { display: none; }
+    .desk-window.w2 { display: none; }
+  }
+  @media (pointer: coarse) {
+    .stage { cursor: auto; }
+    .hint { display: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .marquee.animate { transition: none; }
+  }
+</style>
+</head>
+<body>
+
+<header class="stage" id="stage" aria-label="Shotty">
+  <div class="desk-window w1" aria-hidden="true"></div>
+  <div class="desk-window w2" aria-hidden="true"></div>
+  <div class="desk-window w3" aria-hidden="true"></div>
+
+  <div class="hero" id="hero">
+    <div class="brand"><img src="icon.png" alt="">Shotty</div>
+    <h1>Screenshots and screen recordings, <span class="mark">from the menu bar.</span></h1>
+    <p class="lede">Freeze the screen, select, annotate, record, trim and share. A free, open-source capture tool for macOS, written in Rust.</p>
+    <div class="actions">
+      <a class="button primary" href="https://github.com/mneuhaus/shotty">
+        <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        Get it on GitHub
+      </a>
+      <a class="button quiet" href="#install">Install</a>
+      <span class="meta">macOS 15+ · MIT</span>
+    </div>
+  </div>
+
+  <div class="marquee" id="marquee" aria-hidden="true"></div>
+  <div class="pill" id="size" aria-hidden="true"></div>
+  <div class="cross-h" id="crossH" aria-hidden="true"></div>
+  <div class="cross-v" id="crossV" aria-hidden="true"></div>
+  <div class="pill coords" id="coords" aria-hidden="true"></div>
+  <div class="pill hint" id="hint" aria-hidden="true">Drag to select · Click for window · Space: window mode · Esc: cancel</div>
+</header>
+
+<main>
+  <section aria-labelledby="keys-title">
+    <div class="wrap">
+      <h2 id="keys-title">Three shortcuts.</h2>
+      <p class="intro">Shotty sits in the menu bar and waits. Everything starts from the keyboard, and nothing leaves your Mac unless you press Upload.</p>
+      <div class="keys">
+        <article class="key-card">
+          <div class="keycap"><kbd>⇧</kbd><kbd>⌘</kbd><kbd>4</kbd></div>
+          <h3>Capture area</h3>
+          <p>The screen freezes so menus and hover states stay put. Drag an area or click a window. The picture lands on the clipboard and the editor opens.</p>
+        </article>
+        <article class="key-card">
+          <div class="keycap"><kbd>⇧</kbd><kbd>⌘</kbd><kbd>3</kbd></div>
+          <h3>Capture screen</h3>
+          <p>The whole display under the mouse, at full Retina resolution, straight to the clipboard and into the editor.</p>
+        </article>
+        <article class="key-card">
+          <div class="keycap"><kbd>⇧</kbd><kbd>⌘</kbd><kbd>5</kbd></div>
+          <h3>Record screen</h3>
+          <p>Pick an area, press Record, stop with the same shortcut. Cursor and clicks are shown; the microphone is one toggle away.</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section aria-labelledby="editor-title">
+    <div class="wrap">
+      <h2 id="editor-title">Point at things.</h2>
+      <p class="intro">The editor opens right after a capture. Every tool has a single key, and what you see is what gets copied, at full resolution.</p>
+      <div class="editor">
+        <figure style="margin:0">
+          <div class="shot"><img src="assets/annotated.png" width="1088" height="692" alt="A settings window annotated in Shotty: the email address pixelated, a highlighted line, a red “Turn this on” label with an arrow to a toggle, a blue frame around the Save button and numbered steps 1 and 2"></div>
+          <figcaption class="caption">Exported from Shotty's editor, not mocked up.</figcaption>
+        </figure>
+        <div>
+          <ul class="tools">
+            <li><kbd>A</kbd><span>Arrow</span></li>
+            <li><kbd>R</kbd><span>Rectangle <span class="note">· <kbd style="height:22px;min-width:22px;font-size:12px">O</kbd> ellipse · <kbd style="height:22px;min-width:22px;font-size:12px">L</kbd> line</span></span></li>
+            <li><kbd>H</kbd><span>Highlighter</span></li>
+            <li><kbd>T</kbd><span>Text label</span></li>
+            <li><kbd>N</kbd><span>Numbered step <span class="note">· counts up by itself</span></span></li>
+            <li><kbd>B</kbd><span>Pixelate <span class="note">· for emails, names, tokens</span></span></li>
+            <li><kbd>C</kbd><span>Crop</span></li>
+            <li><kbd>V</kbd><span>Select and move</span></li>
+          </ul>
+          <div class="chords">
+            <div><kbd>⌘C</kbd> Copy and close</div>
+            <div><kbd>⌘U</kbd> Upload and copy the link</div>
+            <div><kbd>⌘Z</kbd> Undo, as often as you like</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section aria-labelledby="record-title">
+    <div class="wrap">
+      <h2 id="record-title">Record, trim, send.</h2>
+      <p class="intro">Short clips for bug reports and how-tos, small enough to paste into a chat.</p>
+      <ol class="flow">
+        <li><h3>Select</h3><p>Drag the area, or click a window or the desktop.</p></li>
+        <li><h3>Record</h3><p>Press Record in the bar below the area. Shotty's own frame never shows up in the video.</p></li>
+        <li><h3>Trim</h3><p>Drag the yellow edges on the thumbnail strip, frame-accurate.</p></li>
+        <li><h3>Export</h3><p>Compact MP4, HEVC or GIF. The file is on the clipboard when it's done.</p></li>
+      </ol>
+      <div class="sizes" role="group" aria-labelledby="sizes-title">
+        <h3 id="sizes-title">What a 30-second recording weighs</h3>
+        <p class="sub">Measured on a generated screen clip with code text, a scroll and a moving cursor.</p>
+        <div class="bar-row"><span>Recording as is</span><div class="track"><div class="fill" style="width:93.6%"></div></div><span class="mb">16.6 MB</span></div>
+        <div class="bar-row best"><span>MP4 <small>default, plays everywhere</small></span><div class="track"><div class="fill" style="width:11.7%"></div></div><span class="mb">2.1 MB</span></div>
+        <div class="bar-row"><span>MP4, 1200 px <small>for full-screen recordings</small></span><div class="track"><div class="fill" style="width:6.2%"></div></div><span class="mb">1.1 MB</span></div>
+        <div class="bar-row"><span>MP4 · HEVC <small>smallest, not every browser</small></span><div class="track"><div class="fill" style="width:9.6%"></div></div><span class="mb">1.7 MB</span></div>
+        <div class="bar-row"><span>GIF <small>short loops only</small></span><div class="track"><div class="fill" style="width:100%"></div></div><span class="mb">17.7 MB</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section aria-labelledby="share-title">
+    <div class="wrap share">
+      <div>
+        <h2 id="share-title">Your link, your server.</h2>
+        <p class="intro" style="margin-bottom:0">Upload sends the capture to a small server you run yourself and copies the link. It opens a clean viewer with a preview in chat apps and a download button.</p>
+        <ul class="facts">
+          <li><b>Unguessable.</b> 128 random bits, never listed anywhere.</li>
+          <li><b>Yours to delete.</b> “Delete Last Upload” in the menu bar, and the link is gone.</li>
+          <li><b>Opt-in.</b> Nothing is uploaded until you ask.</li>
+        </ul>
+      </div>
+      <div class="link-chip" aria-label="Example of a copied link">
+        <span class="ok">Link copied</span>
+        <span>https://artifacts.neuhaus.nrw/nvDQ3_fx6geVEMSmvIl8hg/</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="install" id="install" aria-labelledby="install-title">
+    <div class="wrap">
+      <h2 id="install-title">Install.</h2>
+      <p class="intro">Shotty is built from source. It takes a couple of minutes the first time.</p>
+<pre><code>git clone https://github.com/mneuhaus/shotty.git
+cd shotty
+tools/bundle-macos.sh --install   <span class="c"># release build, signed, into /Applications</span>
+open /Applications/Shotty.app</code></pre>
+      <div class="reqs">
+        <div><b>macOS 15 or later</b>Apple Silicon is tested; Intel should build.</div>
+        <div><b>Rust and Xcode</b>Stable Rust, Xcode with the Metal toolchain.</div>
+        <div><b>ffmpeg</b><code>brew install ffmpeg</code>, for trimming and exporting clips.</div>
+      </div>
+      <p class="notice">Allow <b>Screen Recording</b> when macOS asks, then reopen Shotty. Coming from CleanShot X? Quit it first; both apps want ⇧⌘3, ⇧⌘4 and ⇧⌘5.</p>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>Shotty by <a href="https://github.com/mneuhaus">Marc Neuhaus</a> · MIT license</span>
+    <span>Built with <a href="https://www.gpui.rs">GPUI</a>, <a href="https://github.com/longbridge/gpui-kit">GPUI Kit</a> and <a href="https://github.com/doom-fish/screencapturekit-rs">screencapturekit-rs</a></span>
+  </div>
+</footer>
+
+<script>
+(() => {
+  // The hero behaves like Shotty's overlay: the marquee frames the headline, a crosshair follows
+  // the pointer with coordinates in device pixels, and you can drag your own selection.
+  const stage = document.getElementById('stage');
+  const hero = document.getElementById('hero');
+  const marquee = document.getElementById('marquee');
+  const sizePill = document.getElementById('size');
+  const crossH = document.getElementById('crossH');
+  const crossV = document.getElementById('crossV');
+  const coords = document.getElementById('coords');
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let custom = null, dragFrom = null;
+
+  const dpr = () => window.devicePixelRatio || 1;
+  const local = (e) => { const r = stage.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+
+  function place(rect) {
+    Object.assign(marquee.style, { left: rect.x + 'px', top: rect.y + 'px', width: rect.w + 'px', height: rect.h + 'px' });
+    sizePill.textContent = `${Math.round(rect.w * dpr())} × ${Math.round(rect.h * dpr())}`;
+    const below = rect.y + rect.h + 8;
+    const fits = below + 26 < stage.clientHeight;
+    Object.assign(sizePill.style, { left: rect.x + 'px', top: (fits ? below : rect.y + rect.h - 30) + 'px' });
+  }
+
+  function home() {
+    const s = stage.getBoundingClientRect(), h = hero.getBoundingClientRect();
+    return { x: h.left - s.left, y: h.top - s.top, w: h.width, h: h.height };
+  }
+
+  function reset(animate) {
+    custom = null;
+    marquee.classList.toggle('animate', animate && !reduced);
+    place(home());
+  }
+
+  stage.addEventListener('pointermove', (e) => {
+    if (e.pointerType !== 'mouse') return;
+    const p = local(e);
+    stage.classList.add('pointing');
+    crossH.style.top = p.y + 'px';
+    crossV.style.left = p.x + 'px';
+    coords.textContent = `${Math.round(p.x * dpr())} , ${Math.round(p.y * dpr())}`;
+    Object.assign(coords.style, { left: p.x + 14 + 'px', top: p.y + 14 + 'px' });
+    if (dragFrom) {
+      custom = { x: Math.min(dragFrom.x, p.x), y: Math.min(dragFrom.y, p.y), w: Math.abs(p.x - dragFrom.x), h: Math.abs(p.y - dragFrom.y) };
+      place(custom);
+    }
+  });
+  stage.addEventListener('pointerleave', () => stage.classList.remove('pointing'));
+  stage.addEventListener('pointerdown', (e) => {
+    if (e.pointerType !== 'mouse' || e.button !== 0 || e.target.closest('a')) return;
+    dragFrom = local(e);
+    marquee.classList.remove('animate');
+    stage.classList.add('dragging');
+    stage.setPointerCapture(e.pointerId);
+  });
+  stage.addEventListener('pointerup', () => {
+    if (!dragFrom) return;
+    dragFrom = null;
+    stage.classList.remove('dragging');
+    // A click without a drag puts the frame back around the headline, like picking a window.
+    if (!custom || custom.w < 6 || custom.h < 6) reset(true);
+  });
+  addEventListener('keydown', (e) => { if (e.key === 'Escape' && custom) reset(true); });
+  addEventListener('resize', () => { if (!custom) reset(false); });
+  document.fonts?.ready.then(() => reset(false));
+  reset(false);
+})();
+</script>
+</body>
+</html>
