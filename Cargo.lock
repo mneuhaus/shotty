@@ -6282,6 +6282,7 @@ dependencies = [
  "chrono",
  "dirs 6.0.0",
  "env_logger",
+ "futures",
  "global-hotkey",
  "gpui-kit",
  "image",
@@ -6295,6 +6296,7 @@ dependencies = [
  "shotty-annotate",
  "shotty-capture",
  "shotty-media",
+ "shotty-share",
  "toml 0.9.12+spec-1.1.0",
 ]
 

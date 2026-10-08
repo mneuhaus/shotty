@@ -432,9 +432,43 @@ impl Editor {
         window.remove_window();
     }
 
-    fn upload(&mut self, _: &Upload, _: &mut Window, cx: &mut Context<Self>) {
-        self.status = Some("Upload is not built yet".into());
-        cx.notify();
+    /// Saves the annotated picture over the capture file, uploads it and puts the link on the clipboard.
+    fn upload(&mut self, _: &Upload, window: &mut Window, cx: &mut Context<Self>) {
+        self.export(window, cx, |this, png, window, cx| {
+            if let Err(e) = std::fs::write(&this.path, &png) {
+                this.status = Some(format!("Saving failed: {e}").into());
+                return cx.notify();
+            }
+            this.discard_armed = false;
+            let (task, progress) = crate::share::upload(this.path.clone(), cx);
+            this.status = Some("Uploading…".into());
+            cx.spawn_in(window, async move |this, cx| {
+                let mut task = std::pin::pin!(task);
+                // Repaint the percentage while the upload runs.
+                let result = loop {
+                    let tick = cx.background_executor().timer(std::time::Duration::from_millis(200));
+                    match futures::future::select(task.as_mut(), tick).await {
+                        futures::future::Either::Left((result, _)) => break result,
+                        futures::future::Either::Right(_) => {
+                            let pct = (crate::share::fraction(&progress) * 100.).round();
+                            let _ = this.update(cx, |this, cx| {
+                                this.status = Some(format!("Uploading… {pct}%").into());
+                                cx.notify();
+                            });
+                        }
+                    }
+                };
+                let _ = this.update(cx, |this, cx| {
+                    this.status = Some(match result {
+                        Ok(up) => format!("Link copied: {}", up.url).into(),
+                        Err(e) => format!("Upload failed: {e:#}").into(),
+                    });
+                    cx.notify();
+                });
+            })
+            .detach();
+            cx.notify();
+        });
     }
 
     fn patch(&mut self, area: Area) -> Option<Arc<RenderImage>> {
@@ -527,6 +561,14 @@ impl Editor {
                     .child(Button::new("redo").icon(IconName::Redo2).ghost().small().tooltip("Redo  ⇧⌘Z").on_click(
                         cx.listener(|this, _, window, cx| this.redo(&Redo, window, cx)),
                     )),
+            )
+            .child(
+                Button::new("upload")
+                    .icon(IconName::CloudUpload)
+                    .ghost()
+                    .small()
+                    .tooltip("Upload and copy link  ⌘U")
+                    .on_click(cx.listener(|this, _, window, cx| this.upload(&Upload, window, cx))),
             )
             .child(
                 Button::new("save")
@@ -699,6 +741,10 @@ fn paint_shapes(shapes: &[Shape], origin: Point<Pixels>, k: f32, window: &mut Wi
 
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::env::var("SHOTTY_DEMO").as_deref() == Ok("screen-upload") && self.status.is_none() {
+            self.status = Some("demo".into());
+            window.dispatch_action(Box::new(Upload), cx);
+        }
         // Fit the picture (at most 1:1 in points) into the area below the toolbar.
         let viewport = window.viewport_size();
         let (iw, ih) = (self.base.width() as f32, self.base.height() as f32);

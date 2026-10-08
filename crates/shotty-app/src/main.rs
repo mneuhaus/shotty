@@ -10,6 +10,7 @@ mod native;
 mod output;
 mod overlay;
 mod recorder;
+mod share;
 
 use std::borrow::Cow;
 use std::sync::{Arc, OnceLock};
@@ -29,6 +30,8 @@ pub enum Command {
     CaptureScreen,
     CaptureArea,
     Record,
+    CopyLastLink,
+    DeleteLastUpload,
     OpenFolder,
     Quit,
 }
@@ -93,8 +96,8 @@ struct Recorder {
     recording: Option<Recording>,
 }
 
-struct Shotty {
-    config: Config,
+pub(crate) struct Shotty {
+    pub(crate) config: Config,
     status: native::StatusItem,
     _hotkeys: hotkeys::Hotkeys,
     menu: Vec<Command>,
@@ -128,9 +131,18 @@ fn build_menu(config: &Config, failed: &[String], recording: bool) -> (Vec<nativ
         (Command::CaptureArea, "Capture Area", key(&h.capture_area), false),
         (Command::CaptureScreen, "Capture Screen", key(&h.capture_screen), false),
         (Command::Record, if recording { "Stop Recording" } else { "Record Screen" }, key(&h.record), false),
+    ];
+    let mut entries = entries;
+    if let Some(last) = share::history().last() {
+        let name = last.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        entries.push((Command::CopyLastLink, "Copy Last Upload Link", None, true));
+        entries.push((Command::DeleteLastUpload, "Delete Last Upload…", None, false));
+        log::debug!("last upload: {name}");
+    }
+    entries.extend([
         (Command::OpenFolder, "Open Shotty Folder", None, true),
         (Command::Quit, "Quit Shotty", Some(("q".into(), NSEventModifierFlags::Command)), true),
-    ];
+    ]);
     let commands = entries.iter().map(|e| e.0).collect();
     let menu = entries
         .into_iter()
@@ -169,6 +181,25 @@ fn handle(event: Event, cx: &mut App) {
             let _ = std::process::Command::new("open").arg(dir).spawn();
         }
         Event::Command(Command::Quit) => cx.quit(),
+        Event::Command(Command::CopyLastLink) => {
+            if let Some(last) = share::history().last() {
+                let link = match cx.global::<Shotty>().config.upload.copy {
+                    config::LinkKind::Page => last.upload.url.clone(),
+                    config::LinkKind::Direct => last.upload.direct.clone(),
+                };
+                cx.write_to_clipboard(ClipboardItem::new_string(link));
+            }
+        }
+        Event::Command(Command::DeleteLastUpload) => {
+            let task = share::delete_last(cx);
+            cx.spawn(async move |cx| {
+                if let Err(e) = task.await {
+                    log::error!("deleting the upload failed: {e:#}");
+                }
+                cx.update(refresh_menu);
+            })
+            .detach();
+        }
         Event::Overlay(outcome) => finish_overlay(outcome, cx),
     }
 }
@@ -364,7 +395,7 @@ fn deliver(image: RgbaImage, scale: f32, cx: &mut App) {
     .detach();
 }
 
-fn refresh_menu(cx: &mut App) {
+pub(crate) fn refresh_menu(cx: &mut App) {
     let state = cx.global_mut::<Shotty>();
     let recording = state.recorder.as_ref().is_some_and(|r| matches!(r.phase, Phase::Recording(_)));
     let (entries, menu) = build_menu(&state.config, &state.failed_hotkeys, recording);

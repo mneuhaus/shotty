@@ -11,6 +11,31 @@ pub struct Config {
     pub save_dir: PathBuf,
     pub hotkeys: HotkeyConfig,
     pub recording: RecordingConfig,
+    pub upload: UploadConfig,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LinkKind {
+    /// The viewer page (link previews in chats, download button).
+    Page,
+    /// The file itself (for Markdown/HTML embedding).
+    Direct,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UploadConfig {
+    pub url: String,
+    /// `None`: the artifacts CLI's `~/.config/artifacts/token`.
+    pub token_path: Option<PathBuf>,
+    pub copy: LinkKind,
+}
+
+impl Default for UploadConfig {
+    fn default() -> Self {
+        Self { url: shotty_share::DEFAULT_URL.into(), token_path: None, copy: LinkKind::Page }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -51,12 +76,13 @@ impl Default for HotkeyConfig {
 impl Default for Config {
     fn default() -> Self {
         let pictures = dirs::picture_dir().unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join("Pictures"));
-        Self { save_dir: pictures.join("Shotty"), hotkeys: HotkeyConfig::default(), recording: RecordingConfig::default() }
+        Self { save_dir: pictures.join("Shotty"), hotkeys: HotkeyConfig::default(), recording: RecordingConfig::default(), upload: UploadConfig::default() }
     }
 }
 
+/// `~/Library/Application Support/Shotty`, or `$SHOTTY_SUPPORT` (tests and demos).
 pub fn support_dir() -> PathBuf {
-    dirs::data_dir().unwrap_or_default().join("Shotty")
+    std::env::var_os("SHOTTY_SUPPORT").map(PathBuf::from).unwrap_or_else(|| dirs::data_dir().unwrap_or_default().join("Shotty"))
 }
 
 impl Config {

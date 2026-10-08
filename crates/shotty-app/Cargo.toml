@@ -28,3 +28,5 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 toml = "0.9"
 log = "0.4"
 env_logger = { version = "0.11", default-features = false }
+futures = "0.3"
+shotty-share.workspace = true
