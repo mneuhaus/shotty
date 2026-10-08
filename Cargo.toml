@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/shotty-capture", "crates/shotty-annotate", "crates/shotty-app"]
+members = ["crates/shotty-capture", "crates/shotty-annotate", "crates/shotty-media", "crates/shotty-app"]
 
 [workspace.package]
 version = "0.1.0"
@@ -13,6 +13,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 shotty-capture = { path = "crates/shotty-capture" }
 shotty-annotate = { path = "crates/shotty-annotate" }
+shotty-media = { path = "crates/shotty-media" }
 
 [profile.dev]
 opt-level = 1

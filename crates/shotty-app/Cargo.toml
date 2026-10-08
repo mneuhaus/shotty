@@ -14,6 +14,7 @@ serde.workspace = true
 serde_json.workspace = true
 shotty-capture.workspace = true
 shotty-annotate.workspace = true
+shotty-media.workspace = true
 gpui-kit = "=0.7.1"
 global-hotkey = "0.8"
 async-channel = "2"

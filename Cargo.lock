@@ -6293,6 +6293,7 @@ dependencies = [
  "serde_json",
  "shotty-annotate",
  "shotty-capture",
+ "shotty-media",
  "toml 0.9.12+spec-1.1.0",
 ]
 
@@ -6303,6 +6304,14 @@ dependencies = [
  "anyhow",
  "image",
  "screencapturekit 11.0.0",
+]
+
+[[package]]
+name = "shotty-media"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "image",
 ]
 
 [[package]]
