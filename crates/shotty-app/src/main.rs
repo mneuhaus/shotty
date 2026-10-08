@@ -4,12 +4,13 @@
 //! `SHOTTY_DEMO=area` opens the selection overlay right after start (for testing).
 
 mod config;
+mod editor;
 mod hotkeys;
 mod native;
 mod output;
 mod overlay;
-mod preview;
 
+use std::borrow::Cow;
 use std::sync::{Arc, OnceLock};
 
 use gpui_kit::component::{Theme, ThemeMode};
@@ -35,6 +36,33 @@ pub enum Event {
     Command(Command),
     Menu(usize),
     Overlay(Outcome),
+}
+
+gpui_kit::assets::icon_assets!(
+    ExtraIcons,
+    [
+        MousePointer2, MoveUpRight, Circle, Highlighter, Type, ListOrdered, Grid3x3, Crop, Save, CloudUpload, Video,
+        Scissors, MicOff, CircleStop, Link, Film
+    ]
+);
+
+struct AppAssets;
+
+impl AssetSource for AppAssets {
+    fn load(&self, path: &str) -> gpui_kit::Result<Option<Cow<'static, [u8]>>> {
+        if let Some(b) = ExtraIcons.load(path)? {
+            return Ok(Some(b));
+        }
+        gpui_kit::assets::Assets.load(path)
+    }
+
+    fn list(&self, path: &str) -> gpui_kit::Result<Vec<SharedString>> {
+        let mut v = gpui_kit::assets::Assets.list(path)?;
+        v.extend(ExtraIcons.list(path)?);
+        v.sort();
+        v.dedup();
+        Ok(v)
+    }
 }
 
 static EVENTS: OnceLock<async_channel::Sender<Event>> = OnceLock::new();
@@ -256,8 +284,10 @@ fn deliver(image: RgbaImage, scale: f32, cx: &mut App) {
         let result = task.await;
         cx.update(|cx| match result {
             Ok((image, png, path)) => {
-                output::copy_png(png.clone(), cx);
-                preview::open(Arc::new(image), Arc::new(png), path, scale, cx);
+                if std::env::var_os("SHOTTY_DEMO").is_none() {
+                    output::copy_png(png, cx);
+                }
+                editor::open(Arc::new(image), path, scale, cx);
             }
             Err(e) => eprintln!("shotty: saving failed: {e:#}"),
         })
@@ -269,11 +299,14 @@ fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("shotty=info")).init();
     let (tx, rx) = async_channel::unbounded();
     EVENTS.set(tx.clone()).ok();
-    gpui_kit::application().with_assets(gpui_kit::assets::Assets).run(move |cx| {
+    gpui_kit::application().with_assets(AppAssets).run(move |cx| {
         gpui_kit::init(cx);
+        if let Err(e) = cx.text_system().add_fonts(vec![Cow::Borrowed(shotty_annotate::FONT)]) {
+            log::warn!("annotation font unavailable: {e:#}");
+        }
         apply_theme(None, cx);
         cx.set_activation_policy(ActivationPolicy::Accessory);
-        preview::bind_keys(cx);
+        editor::bind_keys(cx);
 
         let config = Config::load();
         let h = &config.hotkeys;
@@ -302,8 +335,10 @@ fn main() {
         })
         .detach();
 
-        if std::env::var("SHOTTY_DEMO").is_ok_and(|d| d.starts_with("area")) {
-            tx.try_send(Event::Command(Command::CaptureArea)).ok();
-        }
+        match std::env::var("SHOTTY_DEMO").as_deref() {
+            Ok(d) if d.starts_with("area") => tx.try_send(Event::Command(Command::CaptureArea)).ok(),
+            Ok(d) if d.starts_with("screen") => tx.try_send(Event::Command(Command::CaptureScreen)).ok(),
+            _ => None,
+        };
     });
 }

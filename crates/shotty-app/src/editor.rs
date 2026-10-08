@@ -1,0 +1,853 @@
+//! The Shottr-style editor that opens after a screenshot.
+//!
+//! The capture is already saved and on the clipboard when this opens; annotating is optional.
+//! Shapes live in image pixels (`shotty_annotate`); the canvas draws them live, export renders
+//! them with tiny-skia at full resolution.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use gpui_kit::assets::IconName;
+use gpui_kit::base::{h_flex, v_flex};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::{ActiveTheme, Icon, Selectable as _, Sizable};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::*;
+use image::RgbaImage;
+use shotty_annotate::{self as ann, Area, Color, Document, PALETTE, Pt, Shape, pt};
+
+
+gpui_kit::actions!(editor, [CopyImage, SaveImage, Undo, Redo, CloseWindow, Upload]);
+
+pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("cmd-c", CopyImage, Some("Editor")),
+        KeyBinding::new("cmd-s", SaveImage, Some("Editor")),
+        KeyBinding::new("cmd-z", Undo, Some("Editor")),
+        KeyBinding::new("cmd-shift-z", Redo, Some("Editor")),
+        KeyBinding::new("cmd-w", CloseWindow, Some("Editor")),
+        KeyBinding::new("cmd-u", Upload, Some("Editor")),
+    ]);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tool {
+    Select,
+    Arrow,
+    Line,
+    Rect,
+    Ellipse,
+    Highlight,
+    Text,
+    Step,
+    Pixelate,
+    Crop,
+}
+
+impl Tool {
+    const ALL: [Tool; 10] = [
+        Tool::Select,
+        Tool::Arrow,
+        Tool::Line,
+        Tool::Rect,
+        Tool::Ellipse,
+        Tool::Highlight,
+        Tool::Text,
+        Tool::Step,
+        Tool::Pixelate,
+        Tool::Crop,
+    ];
+
+    fn key(self) -> &'static str {
+        match self {
+            Tool::Select => "v",
+            Tool::Arrow => "a",
+            Tool::Line => "l",
+            Tool::Rect => "r",
+            Tool::Ellipse => "o",
+            Tool::Highlight => "h",
+            Tool::Text => "t",
+            Tool::Step => "n",
+            Tool::Pixelate => "b",
+            Tool::Crop => "c",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Tool::Select => "Select & move",
+            Tool::Arrow => "Arrow",
+            Tool::Line => "Line",
+            Tool::Rect => "Rectangle",
+            Tool::Ellipse => "Ellipse",
+            Tool::Highlight => "Highlighter",
+            Tool::Text => "Text",
+            Tool::Step => "Numbered step",
+            Tool::Pixelate => "Pixelate",
+            Tool::Crop => "Crop",
+        }
+    }
+
+    fn icon(self) -> Icon {
+        match self {
+            Tool::Select => IconName::MousePointer2.into(),
+            Tool::Arrow => IconName::MoveUpRight.into(),
+            Tool::Line => IconName::Minus.into(),
+            Tool::Rect => IconName::Square.into(),
+            Tool::Ellipse => IconName::Circle.into(),
+            Tool::Highlight => IconName::Highlighter.into(),
+            Tool::Text => IconName::Type.into(),
+            Tool::Step => IconName::ListOrdered.into(),
+            Tool::Pixelate => IconName::Grid3x3.into(),
+            Tool::Crop => IconName::Crop.into(),
+        }
+    }
+}
+
+/// Stroke presets in points; multiplied by the capture's pixel density.
+const WIDTHS: [(f32, f32, f32); 3] = [(2.0, 14.0, 10.0), (3.5, 18.0, 13.0), (6.0, 26.0, 17.0)];
+
+enum Drag {
+    Draw { from: Pt, to: Pt },
+    Move { index: usize, last: Pt },
+    Crop { from: Pt, to: Pt },
+}
+
+pub struct Editor {
+    base: Arc<RgbaImage>,
+    picture: Arc<RenderImage>,
+    path: PathBuf,
+    /// Pixels per point of the capture (2 on Retina).
+    density: f32,
+    doc: Document,
+    undo: Vec<Document>,
+    redo: Vec<Document>,
+    tool: Tool,
+    color: Color,
+    width: usize,
+    drag: Option<Drag>,
+    selected: Option<usize>,
+    /// The label being typed: index into `doc.shapes`.
+    typing: Option<usize>,
+    patches: HashMap<[i32; 4], Arc<RenderImage>>,
+    focus: FocusHandle,
+    status: Option<SharedString>,
+    discard_armed: bool,
+    /// Image → window mapping from the last layout: origin and points per image pixel.
+    view: (Point<Pixels>, f32),
+}
+
+const TOOLBAR: f32 = 48.;
+const PAD: f32 = 16.;
+
+impl Editor {
+    pub fn new(base: Arc<RgbaImage>, path: PathBuf, density: f32, cx: &mut Context<Self>) -> Self {
+        let picture = crate::output::render_image(&base);
+        let doc = if std::env::var("SHOTTY_DEMO").as_deref() == Ok("screen-shapes") { demo_doc(density) } else { Document::default() };
+        Self {
+            base,
+            picture,
+            path,
+            density,
+            doc,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            tool: Tool::Arrow,
+            color: PALETTE[0],
+            width: 1,
+            drag: None,
+            selected: None,
+            typing: None,
+            patches: HashMap::new(),
+            focus: cx.focus_handle(),
+            status: None,
+            discard_armed: false,
+            view: (point(px(0.), px(0.)), 1.),
+        }
+    }
+
+    pub fn focus_handle(&self) -> &FocusHandle {
+        &self.focus
+    }
+
+    fn dirty(&self) -> bool {
+        !self.doc.shapes.is_empty() || self.doc.crop.is_some()
+    }
+
+    fn stroke(&self) -> f32 {
+        WIDTHS[self.width].0 * self.density
+    }
+
+    fn text_size(&self) -> f32 {
+        WIDTHS[self.width].1 * self.density
+    }
+
+    fn step_radius(&self) -> f32 {
+        WIDTHS[self.width].2 * self.density
+    }
+
+    fn checkpoint(&mut self) {
+        self.undo.push(self.doc.clone());
+        self.redo.clear();
+        self.discard_armed = false;
+    }
+
+    fn to_image(&self, p: Point<Pixels>) -> Pt {
+        let (origin, k) = self.view;
+        pt((p.x - origin.x).as_f32() / k, (p.y - origin.y).as_f32() / k)
+    }
+
+    fn to_view(&self, p: Pt) -> Point<Pixels> {
+        let (origin, k) = self.view;
+        point(origin.x + px(p.x * k), origin.y + px(p.y * k))
+    }
+
+    fn area_to_view(&self, a: Area) -> Bounds<Pixels> {
+        let k = self.view.1;
+        Bounds::new(self.to_view(pt(a.x, a.y)), size(px(a.w * k), px(a.h * k)))
+    }
+
+    /// The shape a drawing drag would produce right now.
+    fn shape_for(&self, from: Pt, to: Pt) -> Option<Shape> {
+        let (color, width) = (self.color, self.stroke());
+        let area = Area::spanning(from, to);
+        Some(match self.tool {
+            Tool::Arrow => Shape::Arrow { from, to, color, width },
+            Tool::Line => Shape::Line { from, to, color, width },
+            Tool::Rect => Shape::Rect { area, color, width },
+            Tool::Ellipse => Shape::Ellipse { area, color, width },
+            Tool::Highlight => Shape::Highlight { area, color },
+            Tool::Pixelate => Shape::Pixelate { area },
+            _ => return None,
+        })
+    }
+
+    fn next_step(&self) -> u32 {
+        self.doc.shapes.iter().filter_map(|s| if let Shape::Step { number, .. } = s { Some(*number) } else { None }).max().unwrap_or(0)
+            + 1
+    }
+
+    fn finish_typing(&mut self) {
+        if let Some(i) = self.typing.take()
+            && matches!(self.doc.shapes.get(i), Some(Shape::Text { text, .. }) if text.trim().is_empty())
+        {
+            self.doc.shapes.remove(i);
+        }
+    }
+
+    fn set_tool(&mut self, tool: Tool, cx: &mut Context<Self>) {
+        self.finish_typing();
+        self.tool = tool;
+        self.selected = None;
+        cx.notify();
+    }
+
+    fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
+        self.finish_typing();
+        let p = self.to_image(event.position);
+        let slop = 6. / self.view.1;
+        match self.tool {
+            Tool::Select => {
+                self.selected = self.doc.shapes.iter().rposition(|s| s.hit(p, slop));
+                if let Some(index) = self.selected {
+                    self.checkpoint();
+                    self.drag = Some(Drag::Move { index, last: p });
+                }
+            }
+            Tool::Text => {
+                self.checkpoint();
+                let size = self.text_size();
+                let at = pt(p.x, p.y - size * 0.7);
+                self.doc.shapes.push(Shape::Text { at, text: String::new(), color: self.color, size });
+                self.typing = Some(self.doc.shapes.len() - 1);
+            }
+            Tool::Step => {
+                self.checkpoint();
+                let number = self.next_step();
+                self.doc.shapes.push(Shape::Step { center: p, number, color: self.color, radius: self.step_radius() });
+            }
+            Tool::Crop => self.drag = Some(Drag::Crop { from: p, to: p }),
+            _ => self.drag = Some(Drag::Draw { from: p, to: p }),
+        }
+        cx.notify();
+    }
+
+    fn mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let p = self.to_image(event.position);
+        match &mut self.drag {
+            Some(Drag::Draw { to, .. } | Drag::Crop { to, .. }) => *to = p,
+            Some(Drag::Move { index, last }) => {
+                let (dx, dy) = (p.x - last.x, p.y - last.y);
+                *last = p;
+                let index = *index;
+                if let Some(shape) = self.doc.shapes.get_mut(index) {
+                    shape.translate(dx, dy);
+                }
+            }
+            None => return,
+        }
+        cx.notify();
+    }
+
+    fn mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        match self.drag.take() {
+            Some(Drag::Draw { from, to }) => {
+                let min = 4. / self.view.1;
+                let big_enough = (to.x - from.x).abs() > min || (to.y - from.y).abs() > min;
+                if big_enough && let Some(shape) = self.shape_for(from, to) {
+                    self.checkpoint();
+                    self.doc.shapes.push(shape);
+                }
+            }
+            Some(Drag::Crop { from, to }) => {
+                let area = Area::spanning(from, to);
+                self.checkpoint();
+                self.doc.crop = (area.w * self.view.1 > 8. && area.h * self.view.1 > 8.)
+                    .then(|| clamp_area(area, self.base.width(), self.base.height()));
+            }
+            Some(Drag::Move { .. }) | None => {}
+        }
+        cx.notify();
+    }
+
+    fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let ks = &event.keystroke;
+        let plain = !ks.modifiers.platform && !ks.modifiers.control && !ks.modifiers.alt;
+        if let Some(i) = self.typing {
+            if let Some(Shape::Text { text, .. }) = self.doc.shapes.get_mut(i) {
+                match ks.key.as_str() {
+                    "escape" => self.finish_typing(),
+                    "enter" if ks.modifiers.shift => text.push('\n'),
+                    "enter" => self.finish_typing(),
+                    "backspace" => {
+                        text.pop();
+                    }
+                    _ if plain => {
+                        if let Some(c) = &ks.key_char {
+                            text.push_str(c);
+                        }
+                    }
+                    _ => return,
+                }
+                cx.stop_propagation();
+                cx.notify();
+            }
+            return;
+        }
+        match ks.key.as_str() {
+            "escape" => {
+                if self.drag.take().is_some() || self.selected.take().is_some() {
+                } else if self.tool == Tool::Crop && self.doc.crop.is_some() {
+                    self.checkpoint();
+                    self.doc.crop = None;
+                } else if self.dirty() && !self.discard_armed {
+                    self.discard_armed = true;
+                    self.status = Some("Unsaved annotations: press Esc again to discard".into());
+                } else {
+                    window.remove_window();
+                    return;
+                }
+            }
+            "backspace" | "delete" if plain => {
+                if let Some(i) = self.selected.take() {
+                    self.checkpoint();
+                    self.doc.shapes.remove(i);
+                }
+            }
+            "enter" if self.tool == Tool::Crop => self.set_tool(Tool::Arrow, cx),
+            key if plain && !ks.modifiers.shift => {
+                if let Some(tool) = Tool::ALL.into_iter().find(|t| t.key() == key) {
+                    self.set_tool(tool, cx);
+                } else if let Some(n) = key.parse::<usize>().ok().filter(|n| (1..=PALETTE.len()).contains(n)) {
+                    self.color = PALETTE[n - 1];
+                } else {
+                    return;
+                }
+            }
+            _ => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
+        self.typing = None;
+        if let Some(prev) = self.undo.pop() {
+            self.redo.push(std::mem::replace(&mut self.doc, prev));
+            self.selected = None;
+            cx.notify();
+        }
+    }
+
+    fn redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(next) = self.redo.pop() {
+            self.undo.push(std::mem::replace(&mut self.doc, next));
+            self.selected = None;
+            cx.notify();
+        }
+    }
+
+    /// Renders the annotated picture off the main thread, then hands the PNG to `then`.
+    fn export(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, Vec<u8>, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        self.finish_typing();
+        let (base, doc) = (self.base.clone(), self.doc.clone());
+        let task = cx.background_executor().spawn(async move { crate::output::encode_png(&ann::render(&base, &doc)) });
+        cx.spawn_in(window, async move |this, cx| {
+            let png = task.await;
+            let _ = this.update_in(cx, |this, window, cx| match png {
+                Ok(png) => then(this, png, window, cx),
+                Err(e) => this.status = Some(format!("Export failed: {e:#}").into()),
+            });
+        })
+        .detach();
+    }
+
+    fn copy(&mut self, _: &CopyImage, window: &mut Window, cx: &mut Context<Self>) {
+        self.export(window, cx, |_, png, window, cx| {
+            crate::output::copy_png(png, cx);
+            window.remove_window();
+        });
+    }
+
+    fn save(&mut self, _: &SaveImage, window: &mut Window, cx: &mut Context<Self>) {
+        self.export(window, cx, |this, png, _, cx| {
+            this.status = Some(match std::fs::write(&this.path, &png) {
+                Ok(()) => format!("Saved to {}", this.path.display()).into(),
+                Err(e) => format!("Saving failed: {e}").into(),
+            });
+            this.discard_armed = false;
+            this.undo.clear();
+            cx.notify();
+        });
+    }
+
+    fn close(&mut self, _: &CloseWindow, window: &mut Window, _: &mut Context<Self>) {
+        window.remove_window();
+    }
+
+    fn upload(&mut self, _: &Upload, _: &mut Window, cx: &mut Context<Self>) {
+        self.status = Some("Upload is not built yet".into());
+        cx.notify();
+    }
+
+    fn patch(&mut self, area: Area) -> Option<Arc<RenderImage>> {
+        let key = [area.x as i32, area.y as i32, area.w as i32, area.h as i32];
+        if let Some(p) = self.patches.get(&key) {
+            return Some(p.clone());
+        }
+        let (_, _, patch) = ann::pixelate(&self.base, area)?;
+        let image = crate::output::render_image(&patch);
+        if self.patches.len() > 64 {
+            self.patches.clear();
+        }
+        self.patches.insert(key, image.clone());
+        Some(image)
+    }
+
+    fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let mut tools = h_flex().gap(px(2.));
+        for tool in Tool::ALL {
+            tools = tools.child(
+                Button::new(SharedString::from(format!("tool-{:?}", tool)))
+                    .icon(tool.icon())
+                    .ghost()
+                    .small()
+                    .selected(self.tool == tool)
+                    .tooltip(format!("{}  ({})", tool.label(), tool.key().to_uppercase()))
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_tool(tool, cx))),
+            );
+        }
+        let mut colors = h_flex().gap(px(6.));
+        for (i, color) in PALETTE.into_iter().enumerate() {
+            let selected = self.color == color;
+            colors = colors.child(
+                div()
+                    .id(("color", i))
+                    .size(px(18.))
+                    .rounded_full()
+                    .bg(rgb(color.to_hex()))
+                    .border_2()
+                    // Every dot gets a faint ring so the near-black swatch shows on a dark toolbar.
+                    .border_color(if selected { theme.foreground } else { theme.foreground.opacity(0.18) })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.color = color;
+                        cx.notify();
+                    })),
+            );
+        }
+        let mut widths = h_flex().gap(px(4.));
+        for (i, (w, _, _)) in WIDTHS.into_iter().enumerate() {
+            widths = widths.child(
+                div()
+                    .id(("width", i))
+                    .size(px(22.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(5.))
+                    .when(self.width == i, |d| d.bg(theme.secondary))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.width = i;
+                        cx.notify();
+                    }))
+                    .child(div().w(px(12.)).h(px(w * 1.2)).rounded_full().bg(theme.foreground)),
+            );
+        }
+        h_flex()
+            .h(px(TOOLBAR))
+            .flex_none()
+            .pl(px(84.))
+            .pr(px(10.))
+            .gap(px(14.))
+            .border_b_1()
+            .border_color(theme.border)
+            .bg(theme.title_bar)
+            .child(tools)
+            .child(div().w(px(1.)).h(px(22.)).bg(theme.border))
+            .child(colors)
+            .child(div().w(px(1.)).h(px(22.)).bg(theme.border))
+            .child(widths)
+            .child(div().flex_1())
+            .child(
+                h_flex()
+                    .gap(px(2.))
+                    .child(Button::new("undo").icon(IconName::Undo2).ghost().small().tooltip("Undo  ⌘Z").on_click(
+                        cx.listener(|this, _, window, cx| this.undo(&Undo, window, cx)),
+                    ))
+                    .child(Button::new("redo").icon(IconName::Redo2).ghost().small().tooltip("Redo  ⇧⌘Z").on_click(
+                        cx.listener(|this, _, window, cx| this.redo(&Redo, window, cx)),
+                    )),
+            )
+            .child(
+                Button::new("save")
+                    .icon(IconName::Save)
+                    .ghost()
+                    .small()
+                    .tooltip("Save  ⌘S")
+                    .on_click(cx.listener(|this, _, window, cx| this.save(&SaveImage, window, cx))),
+            )
+            .child(
+                Button::new("copy")
+                    .icon(IconName::Copy)
+                    .label("Copy")
+                    .primary()
+                    .small()
+                    .tooltip("Copy and close  ⌘C")
+                    .on_click(cx.listener(|this, _, window, cx| this.copy(&CopyImage, window, cx))),
+            )
+    }
+
+    /// Text labels and step badges are real text, laid out by GPUI with the export font.
+    fn label_element(&self, shape: &Shape, caret: bool) -> Option<AnyElement> {
+        let k = self.view.1;
+        match shape {
+            Shape::Text { at, text, color, size } => {
+                let (padx, pady) = ann::pill_padding(*size);
+                let shown = if caret { format!("{text}▏") } else { text.clone() };
+                let p = self.to_view(*at);
+                Some(
+                    div()
+                        .absolute()
+                        .left(p.x)
+                        .top(p.y)
+                        .px(px(padx * k))
+                        .py(px(pady * k))
+                        .rounded(px(size * 0.32 * k))
+                        .bg(rgb(color.to_hex()))
+                        .text_color(rgb(color.contrast().to_hex()))
+                        .font_family(ann::FONT_FAMILY)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(px(size * k))
+                        .line_height(px(size * 1.22 * k))
+                        .whitespace_nowrap()
+                        .children(shown.split('\n').map(|l| div().child(l.to_string())).collect::<Vec<_>>())
+                        .into_any_element(),
+                )
+            }
+            Shape::Step { center, number, color, radius } => {
+                let r = radius * k;
+                let c = self.to_view(*center);
+                Some(
+                    div()
+                        .absolute()
+                        .left(c.x - px(r))
+                        .top(c.y - px(r))
+                        .size(px(r * 2.))
+                        .rounded_full()
+                        .bg(rgb(color.to_hex()))
+                        .border(px(radius * 0.14 * k))
+                        .border_color(white())
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(rgb(color.contrast().to_hex()))
+                        .font_family(ann::FONT_FAMILY)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(px(ann::step_font_size(*radius) * k))
+                        .child(number.to_string())
+                        .into_any_element(),
+                )
+            }
+            _ => None,
+        }
+    }
+}
+
+/// A fixture with one of every shape, for screenshots of the editor.
+fn demo_doc(d: f32) -> Document {
+    let c = PALETTE;
+    Document {
+        shapes: vec![
+            Shape::Pixelate { area: Area { x: 20. * d, y: 60. * d, w: 180. * d, h: 60. * d } },
+            Shape::Arrow { from: pt(450. * d, 350. * d), to: pt(650. * d, 210. * d), color: c[0], width: 3.5 * d },
+            Shape::Rect { area: Area { x: 660. * d, y: 150. * d, w: 300. * d, h: 110. * d }, color: c[0], width: 3.5 * d },
+            Shape::Ellipse { area: Area { x: 100. * d, y: 400. * d, w: 250. * d, h: 130. * d }, color: c[4], width: 3.5 * d },
+            Shape::Highlight { area: Area { x: 450. * d, y: 450. * d, w: 350. * d, h: 30. * d }, color: c[2] },
+            Shape::Text { at: pt(500. * d, 280. * d), text: "Click here".into(), color: c[0], size: 18. * d },
+            Shape::Step { center: pt(410. * d, 360. * d), number: 1, color: c[4], radius: 13. * d },
+        ],
+        crop: None,
+    }
+}
+
+fn clamp_area(a: Area, w: u32, h: u32) -> Area {
+    let x0 = a.x.clamp(0., w as f32);
+    let y0 = a.y.clamp(0., h as f32);
+    let x1 = (a.x + a.w).clamp(0., w as f32);
+    let y1 = (a.y + a.h).clamp(0., h as f32);
+    Area { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+}
+
+fn hsla_of(c: Color, alpha: f32) -> Hsla {
+    let mut h: Hsla = rgb(c.to_hex()).into();
+    h.a = alpha;
+    h
+}
+
+/// Paints strokes and fills for the geometric shapes; `k` maps image pixels to points.
+fn paint_shapes(shapes: &[Shape], origin: Point<Pixels>, k: f32, window: &mut Window) {
+    let at = |p: Pt| point(origin.x + px(p.x * k), origin.y + px(p.y * k));
+    for shape in shapes {
+        match shape {
+            Shape::Arrow { from, to, color, width } => {
+                let (shaft_end, head) = ann::arrow_head(*from, *to, *width);
+                let mut b = PathBuilder::stroke(px(width * k));
+                b.move_to(at(*from));
+                b.line_to(at(shaft_end));
+                if let Ok(path) = b.build() {
+                    window.paint_path(path, hsla_of(*color, 1.));
+                }
+                let mut b = PathBuilder::fill();
+                b.move_to(at(head[0]));
+                b.line_to(at(head[1]));
+                b.line_to(at(head[2]));
+                b.close();
+                if let Ok(path) = b.build() {
+                    window.paint_path(path, hsla_of(*color, 1.));
+                }
+            }
+            Shape::Line { from, to, color, width } => {
+                let mut b = PathBuilder::stroke(px(width * k));
+                b.move_to(at(*from));
+                b.line_to(at(*to));
+                if let Ok(path) = b.build() {
+                    window.paint_path(path, hsla_of(*color, 1.));
+                }
+            }
+            Shape::Rect { area, color, width } => {
+                let outer = area.grow(width / 2.);
+                let bounds = Bounds::new(at(pt(outer.x, outer.y)), size(px(outer.w * k), px(outer.h * k)));
+                window.paint_quad(quad(
+                    bounds,
+                    px(width * 1.4 * k),
+                    transparent_black(),
+                    px(width * k),
+                    hsla_of(*color, 1.),
+                    BorderStyle::Solid,
+                ));
+            }
+            Shape::Ellipse { area, color, width } => {
+                let (start, curves) = ann::ellipse_curves(*area);
+                let mut b = PathBuilder::stroke(px(width * k));
+                b.move_to(at(start));
+                for (c1, c2, end) in curves {
+                    b.cubic_bezier_to(at(end), at(c1), at(c2));
+                }
+                b.close();
+                if let Ok(path) = b.build() {
+                    window.paint_path(path, hsla_of(*color, 1.));
+                }
+            }
+            Shape::Highlight { area, color } => {
+                let bounds = Bounds::new(at(pt(area.x, area.y)), size(px(area.w * k), px(area.h * k)));
+                window.paint_quad(fill(bounds, hsla_of(*color, ann::HIGHLIGHT_ALPHA)));
+            }
+            Shape::Text { .. } | Shape::Step { .. } | Shape::Pixelate { .. } => {}
+        }
+    }
+}
+
+impl Render for Editor {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Fit the picture (at most 1:1 in points) into the area below the toolbar.
+        let viewport = window.viewport_size();
+        let (iw, ih) = (self.base.width() as f32, self.base.height() as f32);
+        let avail = (viewport.width.as_f32() - 2. * PAD, viewport.height.as_f32() - TOOLBAR - 30. - 2. * PAD);
+        let k = (avail.0 / iw).min(avail.1 / ih).min(1. / self.density).max(0.01);
+        let (dw, dh) = (iw * k, ih * k);
+        let origin = point(px(PAD + (avail.0 - dw) / 2.), px(TOOLBAR + PAD + (avail.1 - dh) / 2.));
+        self.view = (origin, k);
+
+        let mut shapes = self.doc.shapes.clone();
+        let mut crop = self.doc.crop;
+        match &self.drag {
+            Some(Drag::Draw { from, to }) => shapes.extend(self.shape_for(*from, *to)),
+            Some(Drag::Crop { from, to }) => crop = Some(Area::spanning(*from, *to)),
+            _ => {}
+        }
+
+        let mut stage = div()
+            .id("stage")
+            .absolute()
+            .left_0()
+            .top_0()
+            .size_full()
+            .cursor(if self.tool == Tool::Select { CursorStyle::Arrow } else { CursorStyle::Crosshair })
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
+            .on_mouse_move(cx.listener(Self::mouse_move))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
+            .child(
+                img(ImageSource::Render(self.picture.clone()))
+                    .absolute()
+                    .left(origin.x)
+                    .top(origin.y)
+                    .w(px(dw))
+                    .h(px(dh)),
+            );
+
+        for area in shapes.iter().filter_map(|s| if let Shape::Pixelate { area } = s { Some(*area) } else { None }) {
+            let clamped = clamp_area(area, self.base.width(), self.base.height());
+            if let Some(patch) = self.patch(clamped) {
+                let b = self.area_to_view(clamped);
+                stage = stage.child(img(ImageSource::Render(patch)).absolute().left(b.origin.x).top(b.origin.y).w(b.size.width).h(b.size.height));
+            }
+        }
+
+        let painted = shapes.clone();
+        stage = stage.child(
+            canvas(|_, _, _| (), move |_, _, window, _| paint_shapes(&painted, origin, k, window)).absolute().size_full(),
+        );
+        for (i, shape) in shapes.iter().enumerate() {
+            if let Some(label) = self.label_element(shape, self.typing == Some(i)) {
+                stage = stage.child(label);
+            }
+        }
+
+        if let Some(i) = self.selected
+            && let Some(shape) = self.doc.shapes.get(i)
+        {
+            let b = self.area_to_view(shape.bounds()).dilate(px(4.));
+            stage = stage.child(
+                div().absolute().left(b.origin.x).top(b.origin.y).w(b.size.width).h(b.size.height).border_1().border_dashed().border_color(rgb(0x0a84ff)),
+            );
+        }
+
+        if let Some(c) = crop {
+            let c = clamp_area(c, self.base.width(), self.base.height());
+            let b = self.area_to_view(c);
+            let shade = black().opacity(if self.tool == Tool::Crop { 0.55 } else { 0.8 });
+            let (l, t, r, btm) = (origin.x, origin.y, origin.x + px(dw), origin.y + px(dh));
+            let (cl, ct, cr, cb) = (b.origin.x, b.origin.y, b.origin.x + b.size.width, b.origin.y + b.size.height);
+            for (x0, y0, x1, y1) in [(l, t, r, ct), (l, cb, r, btm), (l, ct, cl, cb), (cr, ct, r, cb)] {
+                if x1 > x0 && y1 > y0 {
+                    stage = stage.child(div().absolute().left(x0).top(y0).w(x1 - x0).h(y1 - y0).bg(shade));
+                }
+            }
+            stage = stage.child(div().absolute().left(cl).top(ct).w(b.size.width).h(b.size.height).border_1().border_color(white()));
+        }
+
+        let (muted, bar, border) = {
+            let theme = cx.theme();
+            (theme.muted_foreground, theme.title_bar, theme.border)
+        };
+        let info: SharedString = match &self.status {
+            Some(s) => s.clone(),
+            None => {
+                let (w, h) = self.doc.crop.map_or((iw, ih), |c| (c.w.round(), c.h.round()));
+                format!("{} × {}  ·  {}%", w, h, (k * self.density * 100.).round()).into()
+            }
+        };
+
+        v_flex()
+            .key_context("Editor")
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(Self::key_down))
+            .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::save))
+            .on_action(cx.listener(Self::undo))
+            .on_action(cx.listener(Self::redo))
+            .on_action(cx.listener(Self::close))
+            .on_action(cx.listener(Self::upload))
+            .size_full()
+            .bg(rgb(0x18181b))
+            .child(self.toolbar(cx))
+            .child(div().flex_1().relative().child(stage))
+            .child(
+                h_flex()
+                    .h(px(30.))
+                    .flex_none()
+                    .px(px(12.))
+                    .text_xs()
+                    .text_color(muted)
+                    .bg(bar)
+                    .border_t_1()
+                    .border_color(border)
+                    .child(info)
+                    .child(div().flex_1())
+                    .child(self.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
+            )
+    }
+}
+
+/// Opens the editor sized to the picture, at most ~80 % of the main display.
+pub fn open(image: Arc<RgbaImage>, path: PathBuf, density: f32, cx: &mut App) {
+    let display = cx.primary_display().map(|d| d.bounds().size).unwrap_or(size(px(1440.), px(900.)));
+    let chrome = TOOLBAR + 30. + 2. * PAD;
+    let (w, h) = (image.width() as f32 / density, image.height() as f32 / density);
+    let fit = (display.width.as_f32() * 0.8 / (w + 2. * PAD)).min(display.height.as_f32() * 0.8 / (h + chrome)).min(1.);
+    let win = size(px(((w + 2. * PAD) * fit).max(760.)), px(((h + chrome) * fit).max(300.)));
+    let title = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let opened = gpui_kit::open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, win, cx))),
+            titlebar: Some(TitlebarOptions {
+                title: Some(title.into()),
+                appears_transparent: true,
+                traffic_light_position: Some(point(px(16.), px(17.))),
+            }),
+            window_min_size: Some(size(px(640.), px(280.))),
+            ..Default::default()
+        },
+        cx,
+        |window, cx| {
+            let view = cx.new(|cx| Editor::new(image, path, density, cx));
+            let focus = view.read(cx).focus_handle().clone();
+            window.focus(&focus, cx);
+            view
+        },
+    );
+    if let Err(e) = opened {
+        log::error!("could not open the editor: {e:#}");
+    }
+    cx.activate(true);
+}
