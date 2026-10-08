@@ -134,3 +134,14 @@ pub fn capture_window(window_id: u32) -> Result<RgbaImage> {
     let filter = SCContentFilter::create().with_window(&window).build().map_err(|e| anyhow!("{e}"))?;
     shoot(&filter, Rect::from_cg(window.frame()))
 }
+
+mod record;
+pub use record::{RecordOptions, Recording};
+
+/// Pixels per point of a display, from ScreenCaptureKit's content info (no capture needed).
+pub fn scale_of(display_id: u32) -> Result<f64> {
+    let content = content()?;
+    let display = content.displays().into_iter().find(|d| d.display_id() == display_id).context("display is gone")?;
+    let filter = SCContentFilter::create().with_display(&display).with_excluding_windows(&[]).build().map_err(|e| anyhow!("{e}"))?;
+    Ok(SCShareableContentInfo::for_filter(&filter).map_or(2.0, |i| f64::from(i.point_pixel_scale())))
+}

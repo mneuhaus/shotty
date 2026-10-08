@@ -8,3 +8,4 @@ license.workspace = true
 anyhow.workspace = true
 screencapturekit = { version = "=11.0.0", features = ["macos_15_0"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
+log = "0.4"

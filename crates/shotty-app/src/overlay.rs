@@ -1,13 +1,14 @@
 //! The full-screen selection overlay, one per display.
 //!
 //! Screenshots use a frozen frame (captured before the overlay opens), so what you select is exactly
-//! what you get and the overlay can never end up in the picture. Drag selects an area; a plain
-//! click or Space switches to picking the window under the cursor; Esc cancels.
+//! what you get and the overlay can never end up in the picture. Recordings use a see-through
+//! overlay over the live screen. Drag selects an area; a plain click takes the window under the
+//! cursor; Space toggles window mode; Esc cancels.
 
 use std::sync::Arc;
 
 use gpui_kit::*;
-use shotty_capture::{DisplayShot, Rect, WindowInfo};
+use shotty_capture::{DisplayInfo, Rect, WindowInfo};
 
 use crate::{Event, events};
 
@@ -15,6 +16,12 @@ use crate::{Event, events};
 pub enum Mode {
     Area,
     Window,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Purpose {
+    Screenshot,
+    Record,
 }
 
 #[derive(Clone, Debug)]
@@ -26,8 +33,12 @@ pub enum Outcome {
 }
 
 pub struct Overlay {
-    shot: Arc<DisplayShot>,
-    picture: Arc<RenderImage>,
+    display: DisplayInfo,
+    /// Pixels per point, for the size readout.
+    scale: f32,
+    /// The frozen frame (screenshots); `None` shows the live screen through the window.
+    picture: Option<Arc<RenderImage>>,
+    purpose: Purpose,
     /// On-screen windows, front to back, in global points.
     windows: Arc<Vec<WindowInfo>>,
     focus: FocusHandle,
@@ -40,9 +51,25 @@ const DIM: f32 = 0.42;
 const ACCENT: u32 = 0x3b82f6;
 
 impl Overlay {
-    pub fn new(shot: Arc<DisplayShot>, windows: Arc<Vec<WindowInfo>>, cx: &mut Context<Self>) -> Self {
-        let picture = crate::output::render_image(&shot.image);
-        let mut this = Self { shot, picture, windows, focus: cx.focus_handle(), mode: Mode::Area, mouse: None, drag_from: None };
+    pub fn new(
+        display: DisplayInfo,
+        scale: f32,
+        picture: Option<Arc<RenderImage>>,
+        windows: Arc<Vec<WindowInfo>>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let purpose = if picture.is_some() { Purpose::Screenshot } else { Purpose::Record };
+        let mut this = Self {
+            display,
+            scale,
+            picture,
+            purpose,
+            windows,
+            focus: cx.focus_handle(),
+            mode: Mode::Area,
+            mouse: None,
+            drag_from: None,
+        };
         // Screenshot fixtures: a fixed drag, or window mode with the cursor parked mid-screen.
         match std::env::var("SHOTTY_DEMO").as_deref() {
             Ok("area-drag") => (this.drag_from, this.mouse) = (Some(point(px(420.), px(260.))), Some(point(px(1180.), px(720.)))),
@@ -58,7 +85,7 @@ impl Overlay {
     }
 
     fn origin(&self) -> (f64, f64) {
-        (self.shot.display.frame.x, self.shot.display.frame.y)
+        (self.display.frame.x, self.display.frame.y)
     }
 
     fn to_global(&self, p: Point<Pixels>) -> (f64, f64) {
@@ -124,21 +151,29 @@ impl Overlay {
             Some(b) => {
                 let (x, y) = self.to_global(b.origin);
                 let rect = Rect { x, y, width: f64::from(b.size.width.as_f32()), height: f64::from(b.size.height.as_f32()) };
-                self.finish(Outcome::Area { display_id: self.shot.display.id, rect });
+                self.finish(Outcome::Area { display_id: self.display.id, rect });
             }
-            // A click without dragging takes the window under the cursor, in either mode.
-            None => match self.window_under_mouse() {
-                Some(w) => {
-                    let id = w.id;
-                    self.finish(Outcome::Window { id });
+            // A click without dragging takes the window under the cursor, in either mode. Recordings
+            // record the window's area (clipped to this display); the window may move, the area won't.
+            None => match (self.window_under_mouse().cloned(), self.purpose) {
+                (Some(w), Purpose::Screenshot) => self.finish(Outcome::Window { id: w.id }),
+                (Some(w), Purpose::Record) => {
+                    let rect = intersect(w.frame, self.display.frame);
+                    self.finish(Outcome::Area { display_id: self.display.id, rect });
                 }
-                None => {
-                    let rect = self.shot.display.frame;
-                    self.finish(Outcome::Area { display_id: self.shot.display.id, rect });
+                (None, _) => {
+                    let rect = self.display.frame;
+                    self.finish(Outcome::Area { display_id: self.display.id, rect });
                 }
             },
         }
     }
+}
+
+fn intersect(a: Rect, b: Rect) -> Rect {
+    let (x0, y0) = (a.x.max(b.x), a.y.max(b.y));
+    let (x1, y1) = ((a.x + a.width).min(b.x + b.width), (a.y + a.height).min(b.y + b.height));
+    Rect { x: x0, y: y0, width: (x1 - x0).max(0.), height: (y1 - y0).max(0.) }
 }
 
 fn dim(b: Bounds<Pixels>) -> Div {
@@ -176,7 +211,7 @@ impl Render for Overlay {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let viewport = window.viewport_size();
         let full = Bounds::new(point(px(0.), px(0.)), viewport);
-        let scale = self.shot.scale() as f32;
+        let scale = self.scale;
 
         let mut root = div()
             .id("overlay")
@@ -189,7 +224,7 @@ impl Render for Overlay {
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
-            .child(img(ImageSource::Render(self.picture.clone())).absolute().left_0().top_0().size_full());
+            .children(self.picture.clone().map(|p| img(ImageSource::Render(p)).absolute().left_0().top_0().size_full()));
 
         let selection = self.selection();
         let highlight = (selection.is_none() && self.mode == Mode::Window)
@@ -227,9 +262,10 @@ impl Render for Overlay {
             root = root.child(label(text, point(m.x + px(14.), m.y + px(14.))));
         }
 
-        let hint = match self.mode {
-            Mode::Area => "Drag to select · Click for window · Space: window mode · Esc: cancel",
-            Mode::Window => "Click a window · Space: area mode · Esc: cancel",
+        let hint = match (self.purpose, self.mode) {
+            (Purpose::Screenshot, Mode::Area) => "Drag to select · Click for window · Space: window mode · Esc: cancel",
+            (Purpose::Record, Mode::Area) => "Drag the area to record · Click a window or the desktop · Esc: cancel",
+            (_, Mode::Window) => "Click a window · Space: area mode · Esc: cancel",
         };
         root.child(
             div()

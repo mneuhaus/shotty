@@ -10,6 +10,24 @@ pub struct Config {
     /// Where captures are saved.
     pub save_dir: PathBuf,
     pub hotkeys: HotkeyConfig,
+    pub recording: RecordingConfig,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RecordingConfig {
+    pub fps: u32,
+    pub show_cursor: bool,
+    pub show_clicks: bool,
+    /// Initial state of the microphone toggle; the toggle remembers the last choice.
+    pub microphone: bool,
+    pub system_audio: bool,
+}
+
+impl Default for RecordingConfig {
+    fn default() -> Self {
+        Self { fps: 30, show_cursor: true, show_clicks: true, microphone: false, system_audio: false }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -33,7 +51,7 @@ impl Default for HotkeyConfig {
 impl Default for Config {
     fn default() -> Self {
         let pictures = dirs::picture_dir().unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join("Pictures"));
-        Self { save_dir: pictures.join("Shotty"), hotkeys: HotkeyConfig::default() }
+        Self { save_dir: pictures.join("Shotty"), hotkeys: HotkeyConfig::default(), recording: RecordingConfig::default() }
     }
 }
 

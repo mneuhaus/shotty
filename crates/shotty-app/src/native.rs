@@ -132,6 +132,17 @@ pub fn make_fullscreen_overlay(window: &gpui_kit::Window, display_id: u32) {
     win.makeKeyAndOrderFront(None);
 }
 
+/// Strips GPUI's (invisible) title bar frame from a popup panel: no rounded window corners, no shadow,
+/// so only what the view draws is visible.
+pub fn make_borderless(window: &gpui_kit::Window) {
+    if let Some(win) = ns_window(window) {
+        let frame = win.frame();
+        win.setStyleMask(NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel);
+        win.setHasShadow(false);
+        win.setFrame_display(frame, true);
+    }
+}
+
 /// Lets clicks pass through a window (the frame drawn around a running recording).
 pub fn ignore_mouse(window: &gpui_kit::Window) {
     if let Some(win) = ns_window(window) {
