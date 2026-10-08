@@ -12,7 +12,7 @@ use std::time::Duration;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{ActiveTheme, Disableable as _, Selectable as _, Sizable};
+use gpui_kit::component::{ActiveTheme, Disableable as _, Sizable};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use shotty_media::{Codec, CompressOptions, GifOptions, Probe, Trim};

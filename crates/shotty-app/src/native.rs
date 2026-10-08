@@ -94,10 +94,6 @@ impl StatusItem {
         }
         button.setContentTintColor(recording.then(NSColor::systemRedColor).as_deref());
     }
-
-    pub fn is_recording(&self) -> bool {
-        self.recording.get()
-    }
 }
 
 fn ns_window(window: &gpui_kit::Window) -> Option<Retained<NSWindow>> {
@@ -170,7 +166,3 @@ pub fn mouse_location() -> (f64, f64) {
     (p.x, primary_height - p.y)
 }
 
-/// Whether the given GPUI window is AppKit's key window (receives keyboard input).
-pub fn is_key_window(window: &gpui_kit::Window) -> bool {
-    ns_window(window).is_some_and(|w| w.isKeyWindow())
-}
