@@ -12,7 +12,8 @@ use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::popover::Popover;
-use gpui_kit::component::{ActiveTheme, Icon, Selectable as _, Sizable};
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{ActiveTheme, Icon, Sizable};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use image::RgbaImage;
@@ -144,7 +145,10 @@ pub struct Editor {
     view: (Point<Pixels>, f32),
 }
 
-const TOOLBAR: f32 = 52.;
+const TOOLBAR: f32 = 56.;
+/// Toolbar click targets and their icons, in points.
+const BUTTON: f32 = 38.;
+const ICON: f32 = 20.;
 
 impl Editor {
     pub fn new(base: Arc<RgbaImage>, path: PathBuf, density: f32, cx: &mut Context<Self>) -> Self {
@@ -539,28 +543,29 @@ impl Editor {
     fn toolbar(&self, width: f32, zoom: f32, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let (fg, muted, border) = (theme.foreground, theme.muted_foreground, theme.title_bar_border);
-        let action = |id: &'static str, icon: IconName, tip: &'static str| Button::new(id).icon(icon).ghost().small().tooltip(tip);
         let actions = h_flex()
             .gap(px(2.))
-            .child(action("copy", IconName::Copy, "Copy and close  ⌘C").on_click(cx.listener(|this, _, window, cx| this.copy(&CopyImage, window, cx))))
-            .child(action("save", IconName::Save, "Save  ⌘S").on_click(cx.listener(|this, _, window, cx| this.save(&SaveImage, window, cx))))
             .child(
-                action("upload", IconName::CloudUpload, "Upload and copy link  ⌘U")
+                bar_button("copy", IconName::Copy, "Copy and close  ⌘C", false, fg)
+                    .on_click(cx.listener(|this, _, window, cx| this.copy(&CopyImage, window, cx))),
+            )
+            .child(
+                bar_button("save", IconName::Save, "Save  ⌘S", false, fg)
+                    .on_click(cx.listener(|this, _, window, cx| this.save(&SaveImage, window, cx))),
+            )
+            .child(
+                bar_button("upload", IconName::CloudUpload, "Upload and copy link  ⌘U", false, fg)
                     .on_click(cx.listener(|this, _, window, cx| this.upload(&Upload, window, cx))),
             );
         let mut tools = h_flex().gap(px(2.));
         for tool in Tool::ALL {
+            let tip = format!("{}  ({})", tool.label(), tool.key().to_uppercase());
             tools = tools.child(
-                Button::new(SharedString::from(format!("tool-{:?}", tool)))
-                    .icon(tool.icon())
-                    .ghost()
-                    .small()
-                    .selected(self.tool == tool)
-                    .tooltip(format!("{}  ({})", tool.label(), tool.key().to_uppercase()))
+                bar_button(SharedString::from(format!("tool-{tool:?}")), tool.icon(), tip, self.tool == tool, fg)
                     .on_click(cx.listener(move |this, _, _, cx| this.set_tool(tool, cx))),
             );
         }
-        let divider = || div().w(px(1.)).h(px(20.)).mx(px(6.)).bg(border);
+        let divider = || div().w(px(1.)).h(px(24.)).mx(px(6.)).bg(border);
 
         // Readouts, dropped from the left as the window gets narrow.
         let size = {
@@ -570,17 +575,17 @@ impl Editor {
         let color = self.hover.map(|c| {
             h_flex()
                 .gap(px(8.))
-                .child(div().size(px(18.)).rounded_full().bg(rgb(u32::from_be_bytes([0, c[0], c[1], c[2]]))).border_1().border_color(border))
+                .child(div().size(px(20.)).rounded_full().bg(rgb(u32::from_be_bytes([0, c[0], c[1], c[2]]))).border_1().border_color(border))
                 .child(stat(hex(c), "Tab to copy", fg, muted))
         });
-        let mut readouts = h_flex().gap(px(14.)).pr(px(14.));
-        if width > 940. && let Some(color) = color {
+        let mut readouts = h_flex().gap(px(14.)).pr(px(16.));
+        if width > 1040. && let Some(color) = color {
             readouts = readouts.child(color).child(divider());
         }
-        if width > 820. {
+        if width > 900. {
             readouts = readouts.child(size).child(divider());
         }
-        if width > 720. {
+        if width > 760. {
             readouts = readouts.child(stat(format!("{}%", (zoom * 100.).round()), "Zoom", fg, muted));
         }
 
@@ -617,9 +622,10 @@ impl Editor {
             .trigger(
                 Button::new("style-button")
                     .ghost()
-                    .small()
+                    .with_size(px(BUTTON))
+                    .size(px(BUTTON))
                     .tooltip("Color and size  (1–7)")
-                    .child(swatch(self.color, 16.).border_1().border_color(ring.opacity(0.25))),
+                    .child(swatch(self.color, 22.).border_1().border_color(ring.opacity(0.25))),
             )
             .content(move |_, _, cx| {
                 let Some(editor) = editor.upgrade() else { return v_flex() };
@@ -736,8 +742,28 @@ fn hex(c: [u8; 3]) -> String {
 /// A value over a small caption, like Shottr's toolbar readouts.
 fn stat(value: impl Into<SharedString>, caption: &'static str, fg: Hsla, muted: Hsla) -> Div {
     v_flex()
-        .child(div().text_size(px(12.)).line_height(px(15.)).text_color(fg).whitespace_nowrap().child(value.into()))
-        .child(div().text_size(px(10.)).line_height(px(13.)).text_color(muted).whitespace_nowrap().child(caption))
+        .child(div().text_size(px(13.)).line_height(px(16.)).text_color(fg).whitespace_nowrap().child(value.into()))
+        .child(div().text_size(px(11.)).line_height(px(14.)).text_color(muted).whitespace_nowrap().child(caption))
+}
+
+/// A toolbar button. gpui-kit's icon buttons grow the icon with the button, so this sizes both itself.
+fn bar_button(id: impl Into<ElementId>, icon: impl Into<Icon>, tip: impl Into<SharedString>, selected: bool, fg: Hsla) -> Stateful<Div> {
+    let tip: SharedString = tip.into();
+    let (hover, pressed) = (fg.opacity(0.08), fg.opacity(0.15));
+    div()
+        .id(id)
+        .size(px(BUTTON))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(8.))
+        .text_color(fg)
+        .when(selected, |d| d.bg(pressed))
+        .hover(move |s| s.bg(if selected { pressed } else { hover }))
+        .active(move |s| s.bg(pressed))
+        .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+        .child(icon.into().with_size(px(ICON)))
 }
 
 /// The annotations of the website example, on `docs/assets/sample-before.png`.
@@ -979,7 +1005,7 @@ pub fn open(image: Arc<RgbaImage>, path: PathBuf, density: f32, cx: &mut App) {
     let display = cx.primary_display().map(|d| d.bounds().size).unwrap_or(size(px(1440.), px(900.)));
     let (w, h) = (image.width() as f32 / density, image.height() as f32 / density);
     let fit = (display.width.as_f32() * 0.8 / w).min((display.height.as_f32() * 0.8 - TOOLBAR) / h).min(1.);
-    let win = size(px((w * fit).max(720.)), px((h * fit + TOOLBAR).max(320.)));
+    let win = size(px((w * fit).max(780.)), px((h * fit + TOOLBAR).max(320.)));
     let title = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     let demo = std::env::var_os("SHOTTY_DEMO").is_some();
     let opened = gpui_kit::open_window(
@@ -988,9 +1014,10 @@ pub fn open(image: Arc<RgbaImage>, path: PathBuf, density: f32, cx: &mut App) {
             titlebar: Some(TitlebarOptions {
                 title: Some(title.into()),
                 appears_transparent: true,
-                traffic_light_position: Some(point(px(18.), px(19.))),
+                traffic_light_position: Some(point(px(18.), px(21.))),
             }),
-            window_min_size: Some(size(px(620.), px(260.))),
+            // Below this the tools don't fit the toolbar.
+            window_min_size: Some(size(px(680.), px(260.))),
             // Demo windows must not take the keyboard from whoever is working.
             focus: !demo,
             ..Default::default()
