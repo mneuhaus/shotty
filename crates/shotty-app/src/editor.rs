@@ -11,14 +11,14 @@ use std::sync::Arc;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::popover::Popover;
 use gpui_kit::component::{ActiveTheme, Icon, Selectable as _, Sizable};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use image::RgbaImage;
 use shotty_annotate::{self as ann, Area, Color, Document, PALETTE, Pt, Shape, pt};
 
-
-gpui_kit::actions!(editor, [CopyImage, SaveImage, Undo, Redo, CloseWindow, Upload]);
+gpui_kit::actions!(editor, [CopyImage, SaveImage, Undo, Redo, CloseWindow, Upload, CopyColor]);
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -28,6 +28,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-z", Redo, Some("Editor")),
         KeyBinding::new("cmd-w", CloseWindow, Some("Editor")),
         KeyBinding::new("cmd-u", Upload, Some("Editor")),
+        // Shadows gpui-kit's focus-next binding on Tab.
+        KeyBinding::new("tab", CopyColor, Some("Editor")),
     ]);
 }
 
@@ -132,19 +134,27 @@ pub struct Editor {
     typing: Option<usize>,
     patches: HashMap<[i32; 4], Arc<RenderImage>>,
     focus: FocusHandle,
+    /// A short message over the picture (see `flash`).
     status: Option<SharedString>,
+    status_id: u64,
+    /// The color under the cursor, shown in the toolbar; Tab copies it.
+    hover: Option<[u8; 3]>,
     discard_armed: bool,
     /// Image → window mapping from the last layout: origin and points per image pixel.
     view: (Point<Pixels>, f32),
 }
 
-const TOOLBAR: f32 = 48.;
-const PAD: f32 = 16.;
+const TOOLBAR: f32 = 52.;
 
 impl Editor {
     pub fn new(base: Arc<RgbaImage>, path: PathBuf, density: f32, cx: &mut Context<Self>) -> Self {
         let picture = crate::output::render_image(&base);
-        let doc = if std::env::var("SHOTTY_DEMO").as_deref() == Ok("screen-shapes") { demo_doc(density) } else { Document::default() };
+        let demo = std::env::var("SHOTTY_DEMO").unwrap_or_default();
+        let doc = match demo.as_str() {
+            "screen-shapes" => demo_doc(density),
+            "editor" | "editor-style" => sample_doc(),
+            _ => Document::default(),
+        };
         Self {
             base,
             picture,
@@ -161,7 +171,9 @@ impl Editor {
             typing: None,
             patches: HashMap::new(),
             focus: cx.focus_handle(),
-            status: None,
+            status: (demo == "editor").then(|| "Copied #0A84FF".into()),
+            status_id: 0,
+            hover: demo.starts_with("editor").then_some([0x0a, 0x84, 0xff]),
             discard_armed: false,
             view: (point(px(0.), px(0.)), 1.),
         }
@@ -185,6 +197,29 @@ impl Editor {
 
     fn step_radius(&self) -> f32 {
         WIDTHS[self.width].2 * self.density
+    }
+
+    /// Shows `text` over the picture; it goes away after a few seconds unless replaced.
+    fn flash(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        let id = self.show_status(text, cx);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_secs(4)).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.status_id == id {
+                    this.status = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Shows `text` over the picture until the next message.
+    fn show_status(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) -> u64 {
+        self.status = Some(text.into());
+        self.status_id += 1;
+        cx.notify();
+        self.status_id
     }
 
     fn checkpoint(&mut self) {
@@ -276,6 +311,14 @@ impl Editor {
 
     fn mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         let p = self.to_image(event.position);
+        let hover = (p.x >= 0. && p.y >= 0.)
+            .then(|| self.base.get_pixel_checked(p.x as u32, p.y as u32))
+            .flatten()
+            .map(|px| [px[0], px[1], px[2]]);
+        if hover.is_some() && hover != self.hover {
+            self.hover = hover;
+            cx.notify();
+        }
         match &mut self.drag {
             Some(Drag::Draw { to, .. } | Drag::Crop { to, .. }) => *to = p,
             Some(Drag::Move { index, last }) => {
@@ -344,7 +387,7 @@ impl Editor {
                     self.doc.crop = None;
                 } else if self.dirty() && !self.discard_armed {
                     self.discard_armed = true;
-                    self.status = Some("Unsaved annotations: press Esc again to discard".into());
+                    self.flash("Unsaved annotations: press Esc again to discard", cx);
                 } else {
                     window.remove_window();
                     return;
@@ -370,6 +413,14 @@ impl Editor {
         }
         cx.stop_propagation();
         cx.notify();
+    }
+
+    /// Copies the color under the cursor as "#2A4A66".
+    fn copy_color(&mut self, _: &CopyColor, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(hex) = self.hover.map(hex) {
+            cx.write_to_clipboard(ClipboardItem::new_string(hex.clone()));
+            self.flash(format!("Copied {hex}"), cx);
+        }
     }
 
     fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
@@ -403,28 +454,32 @@ impl Editor {
             let png = task.await;
             let _ = this.update_in(cx, |this, window, cx| match png {
                 Ok(png) => then(this, png, window, cx),
-                Err(e) => this.status = Some(format!("Export failed: {e:#}").into()),
+                Err(e) => this.flash(format!("Export failed: {e:#}"), cx),
             });
         })
         .detach();
     }
 
+    /// Copies the picture as image and as file, so Finder pastes a file. The capture file is updated
+    /// first, so that file shows the annotations too.
     fn copy(&mut self, _: &CopyImage, window: &mut Window, cx: &mut Context<Self>) {
-        self.export(window, cx, |_, png, window, cx| {
-            crate::output::copy_png(png, cx);
+        self.export(window, cx, |this, png, window, cx| {
+            if let Err(e) = std::fs::write(&this.path, &png) {
+                return this.flash(format!("Saving failed: {e}"), cx);
+            }
+            crate::native::copy_image_file(&this.path, &png);
             window.remove_window();
         });
     }
 
     fn save(&mut self, _: &SaveImage, window: &mut Window, cx: &mut Context<Self>) {
         self.export(window, cx, |this, png, _, cx| {
-            this.status = Some(match std::fs::write(&this.path, &png) {
-                Ok(()) => format!("Saved to {}", this.path.display()).into(),
-                Err(e) => format!("Saving failed: {e}").into(),
-            });
+            match std::fs::write(&this.path, &png) {
+                Ok(()) => this.flash(format!("Saved to {}", this.path.display()), cx),
+                Err(e) => this.flash(format!("Saving failed: {e}"), cx),
+            }
             this.discard_armed = false;
             this.undo.clear();
-            cx.notify();
         });
     }
 
@@ -436,12 +491,11 @@ impl Editor {
     fn upload(&mut self, _: &Upload, window: &mut Window, cx: &mut Context<Self>) {
         self.export(window, cx, |this, png, window, cx| {
             if let Err(e) = std::fs::write(&this.path, &png) {
-                this.status = Some(format!("Saving failed: {e}").into());
-                return cx.notify();
+                return this.flash(format!("Saving failed: {e}"), cx);
             }
             this.discard_armed = false;
             let (task, progress) = crate::share::upload(this.path.clone(), cx);
-            this.status = Some("Uploading…".into());
+            this.show_status("Uploading…", cx);
             cx.spawn_in(window, async move |this, cx| {
                 let mut task = std::pin::pin!(task);
                 // Repaint the percentage while the upload runs.
@@ -452,22 +506,17 @@ impl Editor {
                         futures::future::Either::Right(_) => {
                             let pct = (crate::share::fraction(&progress) * 100.).round();
                             let _ = this.update(cx, |this, cx| {
-                                this.status = Some(format!("Uploading… {pct}%").into());
-                                cx.notify();
+                                this.show_status(format!("Uploading… {pct}%"), cx);
                             });
                         }
                     }
                 };
-                let _ = this.update(cx, |this, cx| {
-                    this.status = Some(match result {
-                        Ok(up) => format!("Link copied: {}", up.url).into(),
-                        Err(e) => format!("Upload failed: {e:#}").into(),
-                    });
-                    cx.notify();
+                let _ = this.update(cx, |this, cx| match result {
+                    Ok(up) => this.flash(format!("Link copied: {}", up.url), cx),
+                    Err(e) => this.flash(format!("Upload failed: {e:#}"), cx),
                 });
             })
             .detach();
-            cx.notify();
         });
     }
 
@@ -485,8 +534,20 @@ impl Editor {
         Some(image)
     }
 
-    fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Shottr's layout: actions, tools and style on the left, readouts on the right; the empty
+    /// part drags the window.
+    fn toolbar(&self, width: f32, zoom: f32, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let (fg, muted, border) = (theme.foreground, theme.muted_foreground, theme.title_bar_border);
+        let action = |id: &'static str, icon: IconName, tip: &'static str| Button::new(id).icon(icon).ghost().small().tooltip(tip);
+        let actions = h_flex()
+            .gap(px(2.))
+            .child(action("copy", IconName::Copy, "Copy and close  ⌘C").on_click(cx.listener(|this, _, window, cx| this.copy(&CopyImage, window, cx))))
+            .child(action("save", IconName::Save, "Save  ⌘S").on_click(cx.listener(|this, _, window, cx| this.save(&SaveImage, window, cx))))
+            .child(
+                action("upload", IconName::CloudUpload, "Upload and copy link  ⌘U")
+                    .on_click(cx.listener(|this, _, window, cx| this.upload(&Upload, window, cx))),
+            );
         let mut tools = h_flex().gap(px(2.));
         for tool in Tool::ALL {
             tools = tools.child(
@@ -499,96 +560,118 @@ impl Editor {
                     .on_click(cx.listener(move |this, _, _, cx| this.set_tool(tool, cx))),
             );
         }
-        let mut colors = h_flex().gap(px(6.));
-        for (i, color) in PALETTE.into_iter().enumerate() {
-            let selected = self.color == color;
-            colors = colors.child(
-                div()
-                    .id(("color", i))
-                    .size(px(18.))
-                    .rounded_full()
-                    .bg(rgb(color.to_hex()))
-                    .border_2()
-                    // Every dot gets a faint ring so the near-black swatch shows on a dark toolbar.
-                    .border_color(if selected { theme.foreground } else { theme.foreground.opacity(0.18) })
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.color = color;
-                        cx.notify();
-                    })),
-            );
+        let divider = || div().w(px(1.)).h(px(20.)).mx(px(6.)).bg(border);
+
+        // Readouts, dropped from the left as the window gets narrow.
+        let size = {
+            let (w, h) = self.doc.crop.map_or((self.base.width() as f32, self.base.height() as f32), |c| (c.w.round(), c.h.round()));
+            stat(format!("{w} × {h} px"), "Image size", fg, muted)
+        };
+        let color = self.hover.map(|c| {
+            h_flex()
+                .gap(px(8.))
+                .child(div().size(px(18.)).rounded_full().bg(rgb(u32::from_be_bytes([0, c[0], c[1], c[2]]))).border_1().border_color(border))
+                .child(stat(hex(c), "Tab to copy", fg, muted))
+        });
+        let mut readouts = h_flex().gap(px(14.)).pr(px(14.));
+        if width > 940. && let Some(color) = color {
+            readouts = readouts.child(color).child(divider());
         }
-        let mut widths = h_flex().gap(px(4.));
-        for (i, (w, _, _)) in WIDTHS.into_iter().enumerate() {
-            widths = widths.child(
-                div()
-                    .id(("width", i))
-                    .size(px(22.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(5.))
-                    .when(self.width == i, |d| d.bg(theme.secondary))
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.width = i;
-                        cx.notify();
-                    }))
-                    .child(div().w(px(12.)).h(px(w * 1.2)).rounded_full().bg(theme.foreground)),
-            );
+        if width > 820. {
+            readouts = readouts.child(size).child(divider());
         }
+        if width > 720. {
+            readouts = readouts.child(stat(format!("{}%", (zoom * 100.).round()), "Zoom", fg, muted));
+        }
+
         h_flex()
+            .id("toolbar")
+            .absolute()
+            .top_0()
+            .left_0()
+            .w_full()
             .h(px(TOOLBAR))
-            .flex_none()
-            .pl(px(84.))
-            .pr(px(10.))
-            .gap(px(14.))
+            // The stage lies underneath; it must not see clicks on the toolbar.
+            .occlude()
+            .pl(px(82.))
             .border_b_1()
-            .border_color(theme.border)
+            .border_color(border)
             .bg(theme.title_bar)
+            .child(actions)
+            .child(divider())
             .child(tools)
-            .child(div().w(px(1.)).h(px(22.)).bg(theme.border))
-            .child(colors)
-            .child(div().w(px(1.)).h(px(22.)).bg(theme.border))
-            .child(widths)
-            .child(div().flex_1())
-            .child(
-                h_flex()
-                    .gap(px(2.))
-                    .child(Button::new("undo").icon(IconName::Undo2).ghost().small().tooltip("Undo  ⌘Z").on_click(
-                        cx.listener(|this, _, window, cx| this.undo(&Undo, window, cx)),
-                    ))
-                    .child(Button::new("redo").icon(IconName::Redo2).ghost().small().tooltip("Redo  ⇧⌘Z").on_click(
-                        cx.listener(|this, _, window, cx| this.redo(&Redo, window, cx)),
-                    )),
-            )
-            .child(
-                Button::new("upload")
-                    .icon(IconName::CloudUpload)
-                    .ghost()
-                    .small()
-                    .tooltip("Upload and copy link  ⌘U")
-                    .on_click(cx.listener(|this, _, window, cx| this.upload(&Upload, window, cx))),
-            )
-            .child(
-                Button::new("save")
-                    .icon(IconName::Save)
-                    .ghost()
-                    .small()
-                    .tooltip("Save  ⌘S")
-                    .on_click(cx.listener(|this, _, window, cx| this.save(&SaveImage, window, cx))),
-            )
-            .child(
-                Button::new("copy")
-                    .icon(IconName::Copy)
-                    .label("Copy")
-                    .primary()
-                    .small()
-                    .tooltip("Copy and close  ⌘C")
-                    .on_click(cx.listener(|this, _, window, cx| this.copy(&CopyImage, window, cx))),
-            )
+            .child(divider())
+            .child(self.style_picker(cx))
+            .child(div().id("drag").flex_1().h_full().on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move()))
+            .child(readouts)
     }
 
+    /// Current color and stroke; opens the palette and the three sizes.
+    fn style_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let editor = cx.entity().downgrade();
+        let ring = cx.theme().foreground;
+        let swatch = |color: Color, size: f32| div().size(px(size)).rounded_full().bg(rgb(color.to_hex()));
+        Popover::new("style")
+            .anchor(Anchor::TopLeft)
+            .default_open(std::env::var("SHOTTY_DEMO").as_deref() == Ok("editor-style"))
+            .trigger(
+                Button::new("style-button")
+                    .ghost()
+                    .small()
+                    .tooltip("Color and size  (1–7)")
+                    .child(swatch(self.color, 16.).border_1().border_color(ring.opacity(0.25))),
+            )
+            .content(move |_, _, cx| {
+                let Some(editor) = editor.upgrade() else { return v_flex() };
+                let (current, current_width) = {
+                    let e = editor.read(cx);
+                    (e.color, e.width)
+                };
+                let mut colors = h_flex().gap(px(8.));
+                for (i, color) in PALETTE.into_iter().enumerate() {
+                    let editor = editor.clone();
+                    colors = colors.child(
+                        swatch(color, 22.)
+                            .id(("color", i))
+                            .border_2()
+                            .border_color(if color == current { ring } else { ring.opacity(0.15) })
+                            .cursor_pointer()
+                            .on_click(move |_, window, cx| {
+                                editor.update(cx, |e, cx| {
+                                    e.color = color;
+                                    cx.notify();
+                                });
+                                window.refresh();
+                            }),
+                    );
+                }
+                let mut widths = h_flex().gap(px(4.));
+                for (i, (w, _, _)) in WIDTHS.into_iter().enumerate() {
+                    let editor = editor.clone();
+                    widths = widths.child(
+                        div()
+                            .id(("width", i))
+                            .w(px(40.))
+                            .h(px(26.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(6.))
+                            .when(current_width == i, |d| d.bg(ring.opacity(0.12)))
+                            .cursor_pointer()
+                            .on_click(move |_, window, cx| {
+                                editor.update(cx, |e, cx| {
+                                    e.width = i;
+                                    cx.notify();
+                                });
+                                window.refresh();
+                            })
+                            .child(div().w(px(22.)).h(px(w)).rounded_full().bg(rgb(current.to_hex()))),
+                    );
+                }
+                v_flex().gap(px(10.)).p(px(4.)).child(colors).child(widths)
+            })
+    }
     /// Text labels and step badges are real text, laid out by GPUI with the export font.
     fn label_element(&self, shape: &Shape, caret: bool) -> Option<AnyElement> {
         let k = self.view.1;
@@ -642,6 +725,35 @@ impl Editor {
             }
             _ => None,
         }
+    }
+}
+
+/// "#2A4A66"
+fn hex(c: [u8; 3]) -> String {
+    format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2])
+}
+
+/// A value over a small caption, like Shottr's toolbar readouts.
+fn stat(value: impl Into<SharedString>, caption: &'static str, fg: Hsla, muted: Hsla) -> Div {
+    v_flex()
+        .child(div().text_size(px(12.)).line_height(px(15.)).text_color(fg).whitespace_nowrap().child(value.into()))
+        .child(div().text_size(px(10.)).line_height(px(13.)).text_color(muted).whitespace_nowrap().child(caption))
+}
+
+/// The annotations of the website example, on `docs/assets/sample-before.png`.
+fn sample_doc() -> Document {
+    let [red, _, yellow, _, blue, ..] = PALETTE;
+    Document {
+        shapes: vec![
+            Shape::Pixelate { area: Area { x: 838., y: 263., w: 292., h: 43. } },
+            Shape::Highlight { area: Area { x: 378., y: 443., w: 372., h: 24. }, color: yellow },
+            Shape::Text { at: pt(772., 421.), text: "Turn this on".into(), color: red, size: 26. },
+            Shape::Arrow { from: pt(924., 442.), to: pt(1072., 442.), color: red, width: 6. },
+            Shape::Rect { area: Area { x: 374., y: 577., w: 165., h: 63. }, color: blue, width: 5. },
+            Shape::Step { center: pt(1138., 420.), number: 1, color: red, radius: 17. },
+            Shape::Step { center: pt(548., 579.), number: 2, color: blue, radius: 17. },
+        ],
+        crop: None,
     }
 }
 
@@ -745,13 +857,13 @@ impl Render for Editor {
             self.status = Some("demo".into());
             window.dispatch_action(Box::new(Upload), cx);
         }
-        // Fit the picture (at most 1:1 in points) into the area below the toolbar.
+        // Fit the picture (at most 1:1 in points) edge to edge below the toolbar.
         let viewport = window.viewport_size();
         let (iw, ih) = (self.base.width() as f32, self.base.height() as f32);
-        let avail = (viewport.width.as_f32() - 2. * PAD, viewport.height.as_f32() - TOOLBAR - 30. - 2. * PAD);
+        let avail = (viewport.width.as_f32(), viewport.height.as_f32() - TOOLBAR);
         let k = (avail.0 / iw).min(avail.1 / ih).min(1. / self.density).max(0.01);
         let (dw, dh) = (iw * k, ih * k);
-        let origin = point(px(PAD + (avail.0 - dw) / 2.), px(TOOLBAR + PAD + (avail.1 - dh) / 2.));
+        let origin = point(px((avail.0 - dw) / 2.), px(TOOLBAR + (avail.1 - dh) / 2.));
         self.view = (origin, k);
 
         let mut shapes = self.doc.shapes.clone();
@@ -822,19 +934,28 @@ impl Render for Editor {
             stage = stage.child(div().absolute().left(cl).top(ct).w(b.size.width).h(b.size.height).border_1().border_color(white()));
         }
 
-        let (muted, bar, border) = {
-            let theme = cx.theme();
-            (theme.muted_foreground, theme.title_bar, theme.border)
-        };
-        let info: SharedString = match &self.status {
-            Some(s) => s.clone(),
-            None => {
-                let (w, h) = self.doc.crop.map_or((iw, ih), |c| (c.w.round(), c.h.round()));
-                format!("{} × {}  ·  {}%", w, h, (k * self.density * 100.).round()).into()
-            }
-        };
+        if let Some(text) = self.status.clone() {
+            stage = stage.child(
+                div().absolute().bottom(px(16.)).left_0().w_full().flex().justify_center().child(
+                    div()
+                        .max_w(px(dw.max(240.) - 32.))
+                        .px(px(12.))
+                        .py(px(6.))
+                        .rounded(px(8.))
+                        .bg(black().opacity(0.78))
+                        .text_color(white())
+                        .text_size(px(12.))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(text),
+                ),
+            );
+        }
 
-        v_flex()
+        // Stage and toolbar share window coordinates, as do mouse events and the shape canvas.
+        let backdrop = cx.theme().muted;
+        div()
             .key_context("Editor")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key_down))
@@ -844,44 +965,34 @@ impl Render for Editor {
             .on_action(cx.listener(Self::redo))
             .on_action(cx.listener(Self::close))
             .on_action(cx.listener(Self::upload))
+            .on_action(cx.listener(Self::copy_color))
+            .relative()
             .size_full()
-            .bg(rgb(0x18181b))
-            .child(self.toolbar(cx))
-            .child(div().flex_1().relative().child(stage))
-            .child(
-                h_flex()
-                    .h(px(30.))
-                    .flex_none()
-                    .px(px(12.))
-                    .text_xs()
-                    .text_color(muted)
-                    .bg(bar)
-                    .border_t_1()
-                    .border_color(border)
-                    .child(info)
-                    .child(div().flex_1())
-                    .child(self.path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
-            )
+            .bg(backdrop)
+            .child(stage)
+            .child(self.toolbar(viewport.width.as_f32(), k * self.density, cx))
     }
 }
 
 /// Opens the editor sized to the picture, at most ~80 % of the main display.
 pub fn open(image: Arc<RgbaImage>, path: PathBuf, density: f32, cx: &mut App) {
     let display = cx.primary_display().map(|d| d.bounds().size).unwrap_or(size(px(1440.), px(900.)));
-    let chrome = TOOLBAR + 30. + 2. * PAD;
     let (w, h) = (image.width() as f32 / density, image.height() as f32 / density);
-    let fit = (display.width.as_f32() * 0.8 / (w + 2. * PAD)).min(display.height.as_f32() * 0.8 / (h + chrome)).min(1.);
-    let win = size(px(((w + 2. * PAD) * fit).max(760.)), px(((h + chrome) * fit).max(300.)));
+    let fit = (display.width.as_f32() * 0.8 / w).min((display.height.as_f32() * 0.8 - TOOLBAR) / h).min(1.);
+    let win = size(px((w * fit).max(720.)), px((h * fit + TOOLBAR).max(320.)));
     let title = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let demo = std::env::var_os("SHOTTY_DEMO").is_some();
     let opened = gpui_kit::open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, win, cx))),
             titlebar: Some(TitlebarOptions {
                 title: Some(title.into()),
                 appears_transparent: true,
-                traffic_light_position: Some(point(px(16.), px(17.))),
+                traffic_light_position: Some(point(px(18.), px(19.))),
             }),
-            window_min_size: Some(size(px(640.), px(280.))),
+            window_min_size: Some(size(px(620.), px(260.))),
+            // Demo windows must not take the keyboard from whoever is working.
+            focus: !demo,
             ..Default::default()
         },
         cx,
@@ -895,5 +1006,7 @@ pub fn open(image: Arc<RgbaImage>, path: PathBuf, density: f32, cx: &mut App) {
     if let Err(e) = opened {
         log::error!("could not open the editor: {e:#}");
     }
-    cx.activate(true);
+    if !demo {
+        cx.activate(true);
+    }
 }

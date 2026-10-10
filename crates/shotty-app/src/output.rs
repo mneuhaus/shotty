@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use gpui_kit::{App, ClipboardItem, Image, ImageFormat, RenderImage};
+use gpui_kit::RenderImage;
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
 use image::{Frame, ImageEncoder, RgbaImage};
 
@@ -35,15 +35,14 @@ pub fn save_png(dir: &Path, png: &[u8]) -> Result<PathBuf> {
     Ok(path)
 }
 
-pub fn copy_png(png: Vec<u8>, cx: &mut App) {
-    cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(ImageFormat::Png, png)));
-}
-
-/// GPUI draws BGRA; ScreenCaptureKit hands us RGBA.
+/// GPUI draws BGRA; our images are RGBA.
 pub fn render_image(image: &RgbaImage) -> Arc<RenderImage> {
     let mut bgra = image.clone();
-    for px in bgra.pixels_mut() {
-        px.0.swap(0, 2);
-    }
+    shotty_capture::swap_red_blue(&mut bgra);
+    bgra_render_image(bgra)
+}
+
+/// A picture that is already in BGRA byte order (a frozen display).
+pub fn bgra_render_image(bgra: RgbaImage) -> Arc<RenderImage> {
     Arc::new(RenderImage::new([Frame::new(bgra)]))
 }

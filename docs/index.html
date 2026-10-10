@@ -254,7 +254,7 @@
         Get it on GitHub
       </a>
       <a class="button quiet" href="#install">Install</a>
-      <span class="meta">macOS 15+ · MIT</span>
+      <span class="meta">macOS 15.2+ · MIT</span>
     </div>
   </div>
 
@@ -275,7 +275,7 @@
         <article class="key-card">
           <div class="keycap"><kbd>⇧</kbd><kbd>⌘</kbd><kbd>4</kbd></div>
           <h3>Capture area</h3>
-          <p>The screen freezes so menus and hover states stay put. Drag an area or click a window. The picture lands on the clipboard and the editor opens.</p>
+          <p>The screen freezes so menus and hover states stay put. Drag an area or click a window. The picture lands on the clipboard, as image and as file, and the editor opens.</p>
         </article>
         <article class="key-card">
           <div class="keycap"><kbd>⇧</kbd><kbd>⌘</kbd><kbd>3</kbd></div>
@@ -312,7 +312,8 @@
             <li><kbd>V</kbd><span>Select and move</span></li>
           </ul>
           <div class="chords">
-            <div><kbd>⌘C</kbd> Copy and close</div>
+            <div><kbd>⌘C</kbd> Copy and close: pastes as image, or as file in Finder</div>
+            <div><kbd>Tab</kbd> Copy the color under the cursor</div>
             <div><kbd>⌘U</kbd> Upload and copy the link</div>
             <div><kbd>⌘Z</kbd> Undo, as often as you like</div>
           </div>
@@ -370,7 +371,7 @@ cd shotty
 tools/bundle-macos.sh --install   <span class="c"># release build, signed, into /Applications</span>
 open /Applications/Shotty.app</code></pre>
       <div class="reqs">
-        <div><b>macOS 15 or later</b>Apple Silicon is tested; Intel should build.</div>
+        <div><b>macOS 15.2 or later</b>Apple Silicon is tested; Intel should build.</div>
         <div><b>Rust and Xcode</b>Stable Rust, Xcode with the Metal toolchain.</div>
         <div><b>ffmpeg</b><code>brew install ffmpeg</code>, for trimming and exporting clips.</div>
       </div>

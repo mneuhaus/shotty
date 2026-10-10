@@ -6,6 +6,11 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-screencapturekit = { version = "=11.0.0", features = ["macos_15_0"] }
+# macos_15_2: SCScreenshotManager.captureImage(in:), no SCShareableContent round trip.
+screencapturekit = { version = "=11.0.0", features = ["macos_15_2"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 log = "0.4"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFArray", "CFCGTypes"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGDirectDisplay", "CGError", "CGWindow"] }

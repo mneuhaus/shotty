@@ -1,8 +1,9 @@
 //! The full-screen selection overlay, one per display.
 //!
-//! Screenshots use a frozen frame (captured before the overlay opens), so what you select is exactly
-//! what you get and the overlay can never end up in the picture. Recordings use a see-through
-//! overlay over the live screen. Drag selects an area; a plain click takes the window under the
+//! Screenshots use a frozen frame (taken before the overlay opens), so what you select is exactly
+//! what you get and the overlay can never end up in the picture. The overlay opens see-through as
+//! soon as the frame is taken and shows it once its pixels are read back, a few frames later.
+//! Recordings stay see-through over the live screen. Drag selects an area; a plain click takes the window under the
 //! cursor; Space toggles window mode; Esc cancels.
 
 use std::sync::Arc;
@@ -36,7 +37,7 @@ pub struct Overlay {
     display: DisplayInfo,
     /// Pixels per point, for the size readout.
     scale: f32,
-    /// The frozen frame (screenshots); `None` shows the live screen through the window.
+    /// The frozen frame (screenshots); `None` shows the screen through the window.
     picture: Option<Arc<RenderImage>>,
     purpose: Purpose,
     /// On-screen windows, front to back, in global points.
@@ -51,23 +52,19 @@ const DIM: f32 = 0.42;
 const ACCENT: u32 = 0x3b82f6;
 
 impl Overlay {
-    pub fn new(
-        display: DisplayInfo,
-        scale: f32,
-        picture: Option<Arc<RenderImage>>,
-        windows: Arc<Vec<WindowInfo>>,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let purpose = if picture.is_some() { Purpose::Screenshot } else { Purpose::Record };
+    pub fn new(display: DisplayInfo, scale: f32, purpose: Purpose, windows: Arc<Vec<WindowInfo>>, cx: &mut Context<Self>) -> Self {
+        // Show the crosshair right away instead of after the first mouse move.
+        let (mx, my) = crate::native::mouse_location();
+        let mouse = display.frame.contains(mx, my).then(|| point(px((mx - display.frame.x) as f32), px((my - display.frame.y) as f32)));
         let mut this = Self {
             display,
             scale,
-            picture,
+            picture: None,
             purpose,
             windows,
             focus: cx.focus_handle(),
             mode: Mode::Area,
-            mouse: None,
+            mouse,
             drag_from: None,
         };
         // Screenshot fixtures: a fixed drag, or window mode with the cursor parked mid-screen.
@@ -82,6 +79,15 @@ impl Overlay {
 
     pub fn focus_handle(&self) -> &FocusHandle {
         &self.focus
+    }
+
+    pub fn display_id(&self) -> u32 {
+        self.display.id
+    }
+
+    pub fn set_picture(&mut self, picture: Arc<RenderImage>, cx: &mut Context<Self>) {
+        self.picture = Some(picture);
+        cx.notify();
     }
 
     fn origin(&self) -> (f64, f64) {

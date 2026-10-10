@@ -1,15 +1,16 @@
 //! The few AppKit calls GPUI doesn't expose: the menu bar item and overlay window tweaks.
 
 use std::cell::Cell;
+use std::path::Path;
 
 use objc2::rc::Retained;
 use objc2::runtime::{NSObject, ProtocolObject};
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSColor, NSEvent, NSImage, NSMenu, NSMenuItem, NSPasteboard, NSPasteboardWriting, NSScreen, NSStatusBar, NSStatusItem,
-    NSVariableStatusItemLength, NSView, NSWindow, NSWindowStyleMask,
+    NSColor, NSEvent, NSImage, NSMenu, NSMenuItem, NSPasteboard, NSPasteboardItem, NSPasteboardTypeFileURL, NSPasteboardTypePNG,
+    NSPasteboardWriting, NSScreen, NSStatusBar, NSStatusItem, NSVariableStatusItemLength, NSView, NSWindow, NSWindowStyleMask,
 };
-use objc2_foundation::{NSArray, NSNumber, NSString, NSURL};
+use objc2_foundation::{NSArray, NSData, NSNumber, NSString, NSURL};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 define_class!(
@@ -112,7 +113,8 @@ fn screen_for_display(display_id: u32, mtm: MainThreadMarker) -> Option<Retained
 
 /// Turns GPUI's titled popup panel into a borderless, shadowless panel covering the whole display,
 /// menu bar included (GPUI has no option for that).
-pub fn make_fullscreen_overlay(window: &gpui_kit::Window, display_id: u32) {
+/// Demo overlays (`take_keyboard == false`) stay click-through and leave the keyboard alone.
+pub fn make_fullscreen_overlay(window: &gpui_kit::Window, display_id: u32, take_keyboard: bool) {
     let Some(mtm) = MainThreadMarker::new() else { return };
     let Some(win) = ns_window(window) else { return };
     win.setStyleMask(NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel);
@@ -125,7 +127,12 @@ pub fn make_fullscreen_overlay(window: &gpui_kit::Window, display_id: u32) {
         None => log::warn!("no NSScreen for display {display_id}"),
     }
 
-    win.makeKeyAndOrderFront(None);
+    if take_keyboard {
+        win.makeKeyAndOrderFront(None);
+    } else {
+        win.setIgnoresMouseEvents(true);
+        win.orderFrontRegardless();
+    }
 }
 
 /// Strips GPUI's (invisible) title bar frame from a popup panel: no rounded window corners, no shadow,
@@ -157,6 +164,24 @@ pub fn copy_files_to_clipboard(paths: &[std::path::PathBuf]) {
     pasteboard.writeObjects(&NSArray::from_retained_slice(&objects));
 }
 
+/// Puts a saved PNG on the clipboard as picture and file at once, like CleanShot: apps that take
+/// pictures paste the picture, Finder pastes the file.
+pub fn copy_image_file(path: &Path, png: &[u8]) {
+    write_image_file(&NSPasteboard::generalPasteboard(), path, png);
+}
+
+fn write_image_file(pasteboard: &NSPasteboard, path: &Path, png: &[u8]) -> bool {
+    let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+    let Some(url) = url.absoluteString() else { return false };
+    // One item with both representations; two items would paste twice in some apps.
+    let item = NSPasteboardItem::new();
+    let written = unsafe {
+        item.setData_forType(&NSData::with_bytes(png), NSPasteboardTypePNG) && item.setString_forType(&url, NSPasteboardTypeFileURL)
+    };
+    pasteboard.clearContents();
+    written && pasteboard.writeObjects(&NSArray::from_retained_slice(&[ProtocolObject::from_retained(item)]))
+}
+
 /// The mouse position in global CoreGraphics points (top-left origin, y down).
 pub fn mouse_location() -> (f64, f64) {
     let Some(mtm) = MainThreadMarker::new() else { return (0., 0.) };
@@ -166,3 +191,25 @@ pub fn mouse_location() -> (f64, f64) {
     (p.x, primary_height - p.y)
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_file_pastes_as_picture_and_file() {
+        // A private pasteboard: the test never touches the real clipboard.
+        let pasteboard = NSPasteboard::pasteboardWithUniqueName();
+        let path = Path::new("/tmp/Shotty 2026-10-10 at 10.00.00.png");
+        let png = [0x89, b'P', b'N', b'G', 1, 2, 3];
+        assert!(write_image_file(&pasteboard, path, &png));
+        let items = pasteboard.pasteboardItems().unwrap();
+        assert_eq!(items.count(), 1);
+        let item = items.objectAtIndex(0);
+        let (png_type, url_type) = unsafe { (NSPasteboardTypePNG, NSPasteboardTypeFileURL) };
+        assert_eq!(item.dataForType(png_type).unwrap().to_vec(), png);
+        let url = item.stringForType(url_type).unwrap().to_string();
+        assert_eq!(url, "file:///tmp/Shotty%202026-10-10%20at%2010.00.00.png");
+        let _: () = unsafe { msg_send![&*pasteboard, releaseGlobally] };
+    }
+}

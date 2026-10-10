@@ -30,19 +30,22 @@ Shotty is a small, keyboard-first capture tool for the Mac. It started as a pers
 
 | Shortcut | What happens |
 |---|---|
-| **⇧⌘4** Capture area | The screen freezes. Drag an area, click a window, or press Space to pick windows. The PNG goes to the clipboard and to `~/Pictures/Shotty`, and the editor opens. |
+| **⇧⌘4** Capture area | The screen freezes. Drag an area, click a window, or press Space to pick windows. The PNG goes to `~/Pictures/Shotty` and to the clipboard, and the editor opens. |
 | **⇧⌘3** Capture screen | Captures the display under the mouse, same as above. |
 | **⇧⌘5** Record screen | Drag an area or click a window or the desktop, then press **Record** in the bar below it. Stop with the bar, ⇧⌘5 again or the red menu bar icon. Then trim the clip and export it. |
 
 ### Capture
 - **Frozen frame.** Area capture freezes all displays first, so menus, tooltips and hover states stay put, and what you select is exactly what you get.
+- **Fast.** The overlay is up about 20 ms after the shortcut; the frozen pixels follow while you are already dragging.
 - **Every display at once**, menu bar included, with a crosshair, pixel coordinates and a live size readout (`1520 × 920`).
 - **Window capture** takes the window on its own, with transparent corners.
 - **Retina aware:** images are saved at full pixel resolution.
+- **Image and file at once.** The clipboard holds the picture and the saved file, like CleanShot: chat apps and documents paste the picture, Finder pastes the file.
 
 ### Editor
+- A Shottr-style window: the picture edge to edge, one toolbar with actions, tools and readouts (color under the cursor, image size, zoom). Drag the window by the empty part of the toolbar.
 - Arrow, line, rectangle, ellipse, highlighter, text label, numbered steps, pixelate and crop.
-- Seven colors and three stroke sizes; select, move and delete shapes; unlimited undo.
+- Seven colors and three stroke sizes behind the color button; select, move and delete shapes; unlimited undo.
 - What you see is what you export: shapes are drawn live and rendered again at full resolution when you copy, save or upload.
 
 ### Recording
@@ -73,7 +76,7 @@ Nothing is uploaded unless you ask for it.
 Shotty is built from source.
 
 **Requirements**
-- macOS 15 or later (ScreenCaptureKit's recording output).
+- macOS 15.2 or later (ScreenCaptureKit's recording output and `captureImage(in:)`).
 - Rust (stable) and Xcode with the Metal toolchain. If the build complains about `metal`, run `xcodebuild -downloadComponent MetalToolchain`.
 - ffmpeg for exporting clips: `brew install ffmpeg`.
 
@@ -119,9 +122,10 @@ On first use macOS asks for **Screen Recording** permission (and **Microphone** 
 
 | Key | Action |
 |---|---|
-| ⌘C | Copy and close |
+| ⌘C | Copy and close (as image and as file; the capture file gets the annotations) |
 | ⌘S | Save over the capture file |
 | ⌘U | Save, upload, copy the link |
+| Tab | Copy the color under the cursor (`#2A4A66`) |
 | ⌘Z / ⇧⌘Z | Undo / redo |
 | ⌫ | Delete the selected shape |
 | Esc | Close (press twice when there are unsaved annotations) |
@@ -204,14 +208,17 @@ cargo run -p shotty-app          # debug build, menu bar app
 cargo test --workspace           # annotate, media (needs ffmpeg), share, hotkeys
 ```
 
-`SHOTTY_DEMO` drives the UI without mouse or keyboard, for screenshots and smoke tests. Demo runs never touch the clipboard.
+`SHOTTY_DEMO` drives the UI without mouse or keyboard, for screenshots and smoke tests. Demo runs never touch the clipboard, and their windows don't take the keyboard (overlays are click-through).
 
 | Value | Shows |
 |---|---|
 | `area`, `area-drag`, `area-window`, `area-cross` | The selection overlay, with a fixed drag, in window mode, or with the crosshair |
 | `screen`, `screen-shapes` | A screen capture in the editor, optionally with one of every shape |
+| `editor`, `editor-style` | The editor on `docs/assets/sample-before.png` (or `SHOTTY_DEMO_IMAGE`) with the website annotations, optionally with the color menu open. No capture, no keyboard focus |
 | `screen-upload` | A capture uploaded straight from the editor |
 | `record`, `record-auto` | The recording overlay, or a 3 s recording of a fixed area |
+
+`cargo run --release -p shotty-capture --example timing` prints how long the capture path takes from shortcut to frozen frame.
 
 The upload client has an integration test against a local artifacts server:
 
