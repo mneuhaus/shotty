@@ -73,7 +73,9 @@ Nothing is uploaded unless you ask for it.
 
 ## Install
 
-Shotty is built from source.
+**Download:** the [latest release](https://github.com/mneuhaus/shotty/releases/latest) has Shotty.app for Apple Silicon. It isn't notarized: move it to Applications, then run `xattr -dr com.apple.quarantine /Applications/Shotty.app` once so macOS opens it. The download is signed ad hoc, so macOS asks for Screen Recording again after each update.
+
+**From source:**
 
 **Requirements**
 - macOS 15.2 or later (ScreenCaptureKit's recording output and `captureImage(in:)`).

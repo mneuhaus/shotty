@@ -365,7 +365,7 @@
   <section class="install" id="install" aria-labelledby="install-title">
     <div class="wrap">
       <h2 id="install-title">Install.</h2>
-      <p class="intro">Shotty is built from source. It takes a couple of minutes the first time.</p>
+      <p class="intro">Download Shotty.app for Apple Silicon from the <a href="https://github.com/mneuhaus/shotty/releases/latest">latest release</a>. It isn't notarized, so run <code>xattr -dr com.apple.quarantine /Applications/Shotty.app</code> once after moving it to Applications. Or build it from source, which takes a couple of minutes the first time:</p>
 <pre><code>git clone https://github.com/mneuhaus/shotty.git
 cd shotty
 tools/bundle-macos.sh --install   <span class="c"># release build, signed, into /Applications</span>
