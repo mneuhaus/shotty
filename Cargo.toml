@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/shotty-capture", "crates/shotty-annotate", "crates/shotty-media", "crates/shotty-share", "crates/shotty-app"]
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 license = "MIT"
 
