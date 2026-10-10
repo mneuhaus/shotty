@@ -541,31 +541,31 @@ impl Editor {
     /// Shottr's layout: actions, tools and style on the left, readouts on the right; the empty
     /// part drags the window.
     fn toolbar(&self, width: f32, zoom: f32, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let (fg, muted, border) = (theme.foreground, theme.muted_foreground, theme.title_bar_border);
+        let chrome = Chrome::of(cx);
+        let (fg, muted) = (chrome.text, chrome.secondary);
         let actions = h_flex()
             .gap(px(2.))
             .child(
-                bar_button("copy", IconName::Copy, "Copy and close  ⌘C", false, fg)
+                bar_button("copy", IconName::Copy, "Copy and close  ⌘C", false, chrome)
                     .on_click(cx.listener(|this, _, window, cx| this.copy(&CopyImage, window, cx))),
             )
             .child(
-                bar_button("save", IconName::Save, "Save  ⌘S", false, fg)
+                bar_button("save", IconName::Save, "Save  ⌘S", false, chrome)
                     .on_click(cx.listener(|this, _, window, cx| this.save(&SaveImage, window, cx))),
             )
             .child(
-                bar_button("upload", IconName::CloudUpload, "Upload and copy link  ⌘U", false, fg)
+                bar_button("upload", IconName::CloudUpload, "Upload and copy link  ⌘U", false, chrome)
                     .on_click(cx.listener(|this, _, window, cx| this.upload(&Upload, window, cx))),
             );
         let mut tools = h_flex().gap(px(2.));
         for tool in Tool::ALL {
             let tip = format!("{}  ({})", tool.label(), tool.key().to_uppercase());
             tools = tools.child(
-                bar_button(SharedString::from(format!("tool-{tool:?}")), tool.icon(), tip, self.tool == tool, fg)
+                bar_button(SharedString::from(format!("tool-{tool:?}")), tool.icon(), tip, self.tool == tool, chrome)
                     .on_click(cx.listener(move |this, _, _, cx| this.set_tool(tool, cx))),
             );
         }
-        let divider = || div().w(px(1.)).h(px(24.)).mx(px(6.)).bg(border);
+        let divider = || div().w(px(1.)).h(px(24.)).mx(px(6.)).bg(chrome.divider);
 
         // Readouts, dropped from the left as the window gets narrow.
         let size = {
@@ -575,7 +575,7 @@ impl Editor {
         let color = self.hover.map(|c| {
             h_flex()
                 .gap(px(8.))
-                .child(div().size(px(20.)).rounded_full().bg(rgb(u32::from_be_bytes([0, c[0], c[1], c[2]]))).border_1().border_color(border))
+                .child(div().size(px(20.)).rounded_full().bg(rgb(u32::from_be_bytes([0, c[0], c[1], c[2]]))).border_1().border_color(chrome.divider))
                 .child(stat(hex(c), "Tab to copy", fg, muted))
         });
         let mut readouts = h_flex().gap(px(14.)).pr(px(16.));
@@ -600,8 +600,8 @@ impl Editor {
             .occlude()
             .pl(px(82.))
             .border_b_1()
-            .border_color(border)
-            .bg(theme.title_bar)
+            .border_color(chrome.edge)
+            .bg(chrome.bar)
             .child(actions)
             .child(divider())
             .child(tools)
@@ -614,10 +614,13 @@ impl Editor {
     /// Current color and stroke; opens the palette and the three sizes.
     fn style_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let editor = cx.entity().downgrade();
-        let ring = cx.theme().foreground;
+        let chrome = Chrome::of(cx);
+        let ring = chrome.text;
         let swatch = |color: Color, size: f32| div().size(px(size)).rounded_full().bg(rgb(color.to_hex()));
         Popover::new("style")
             .anchor(Anchor::TopLeft)
+            .bg(chrome.bar)
+            .border_color(chrome.divider)
             .default_open(std::env::var("SHOTTY_DEMO").as_deref() == Ok("editor-style"))
             .trigger(
                 Button::new("style-button")
@@ -746,10 +749,54 @@ fn stat(value: impl Into<SharedString>, caption: &'static str, fg: Hsla, muted: 
         .child(div().text_size(px(11.)).line_height(px(14.)).text_color(muted).whitespace_nowrap().child(caption))
 }
 
+/// The editor's own colors, after the macOS window chrome (like native apps such as Weitblick
+/// Remote): a soft gray bar instead of gpui-kit's near-black title bar, off-white icons.
+#[derive(Clone, Copy)]
+struct Chrome {
+    bar: Hsla,
+    /// Behind the picture where it doesn't fill the window.
+    backdrop: Hsla,
+    /// Between the toolbar and the picture.
+    edge: Hsla,
+    divider: Hsla,
+    text: Hsla,
+    secondary: Hsla,
+    hover: Hsla,
+    selected: Hsla,
+}
+
+impl Chrome {
+    fn of(cx: &App) -> Self {
+        if cx.theme().is_dark() {
+            Self {
+                bar: rgb(0x1e1e1e).into(),
+                backdrop: rgb(0x161616).into(),
+                edge: black().opacity(0.45),
+                divider: rgb(0x353535).into(),
+                text: rgb(0xdedede).into(),
+                secondary: rgb(0x9a9a9a).into(),
+                hover: white().opacity(0.07),
+                selected: white().opacity(0.13),
+            }
+        } else {
+            Self {
+                bar: rgb(0xffffff).into(),
+                backdrop: rgb(0xefefef).into(),
+                edge: rgb(0xe2e2e2).into(),
+                divider: rgb(0xe2e2e2).into(),
+                text: rgb(0x262626).into(),
+                secondary: rgb(0x8a8a8a).into(),
+                hover: black().opacity(0.05),
+                selected: black().opacity(0.09),
+            }
+        }
+    }
+}
+
 /// A toolbar button. gpui-kit's icon buttons grow the icon with the button, so this sizes both itself.
-fn bar_button(id: impl Into<ElementId>, icon: impl Into<Icon>, tip: impl Into<SharedString>, selected: bool, fg: Hsla) -> Stateful<Div> {
+fn bar_button(id: impl Into<ElementId>, icon: impl Into<Icon>, tip: impl Into<SharedString>, selected: bool, chrome: Chrome) -> Stateful<Div> {
     let tip: SharedString = tip.into();
-    let (hover, pressed) = (fg.opacity(0.08), fg.opacity(0.15));
+    let (fg, hover, pressed) = (chrome.text, chrome.hover, chrome.selected);
     div()
         .id(id)
         .size(px(BUTTON))
@@ -980,7 +1027,7 @@ impl Render for Editor {
         }
 
         // Stage and toolbar share window coordinates, as do mouse events and the shape canvas.
-        let backdrop = cx.theme().muted;
+        let backdrop = Chrome::of(cx).backdrop;
         div()
             .key_context("Editor")
             .track_focus(&self.focus)
