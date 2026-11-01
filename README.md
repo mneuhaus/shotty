@@ -44,7 +44,7 @@ Shotty is a small, keyboard-first capture tool for the Mac. It started as a pers
 
 ### Editor
 - A Shottr-style window: the picture edge to edge, one toolbar with actions, tools and readouts (color under the cursor, image size, zoom). Drag the window by the empty part of the toolbar.
-- Arrow, line, rectangle, ellipse, highlighter, text label, numbered steps, pixelate and crop.
+- Arrow, line, freehand pen, rectangle, ellipse, highlighter, text label, numbered steps, pixelate and crop.
 - Seven colors and three stroke sizes behind the color button; select, move and delete shapes; unlimited undo.
 - What you see is what you export: shapes are drawn live and rendered again at full resolution when you copy, save or upload.
 
@@ -113,6 +113,7 @@ On first use macOS asks for **Screen Recording** permission (and **Microphone** 
 | `V` | Select and move |
 | `A` | Arrow |
 | `L` | Line |
+| `P` | Pen (draw freehand) |
 | `R` | Rectangle |
 | `O` | Ellipse |
 | `H` | Highlighter |

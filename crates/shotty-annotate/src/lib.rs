@@ -1,7 +1,7 @@
 //! Annotations on top of a screenshot, and rendering them into the final picture.
 //!
 //! Everything is in image pixels. The editor draws the same shapes live with GPUI; the geometry
-//! helpers here (`arrow_head`, `ellipse_curves`, `pixelate`, `text_size`) are shared so the
+//! helpers here (`arrow_head`, `ellipse_curves`, `pen_curve`, `pixelate`, `text_size`) are shared so the
 //! preview and the exported PNG agree.
 
 use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
@@ -93,6 +93,8 @@ pub const HIGHLIGHT_ALPHA: f32 = 0.38;
 pub enum Shape {
     Arrow { from: Pt, to: Pt, color: Color, width: f32 },
     Line { from: Pt, to: Pt, color: Color, width: f32 },
+    /// A freehand stroke through `points`; a single point is a dot.
+    Pen { points: Vec<Pt>, color: Color, width: f32 },
     Rect { area: Area, color: Color, width: f32 },
     Ellipse { area: Area, color: Color, width: f32 },
     Highlight { area: Area, color: Color },
@@ -109,6 +111,7 @@ impl Shape {
             Shape::Arrow { from, to, width, .. } | Shape::Line { from, to, width, .. } => {
                 Area::spanning(*from, *to).grow(width * 2.)
             }
+            Shape::Pen { points, width, .. } => points_bounds(points).grow(width / 2.),
             Shape::Rect { area, .. } | Shape::Ellipse { area, .. } | Shape::Highlight { area, .. } | Shape::Pixelate { area } => {
                 *area
             }
@@ -132,6 +135,7 @@ impl Shape {
                 mv(from);
                 mv(to);
             }
+            Shape::Pen { points, .. } => points.iter_mut().for_each(mv),
             Shape::Rect { area, .. } | Shape::Ellipse { area, .. } | Shape::Highlight { area, .. } | Shape::Pixelate { area } => {
                 area.x += dx;
                 area.y += dy;
@@ -146,6 +150,11 @@ impl Shape {
         match self {
             Shape::Arrow { from, to, width, .. } | Shape::Line { from, to, width, .. } => {
                 segment_distance(p, *from, *to) <= width / 2. + slop
+            }
+            Shape::Pen { points, width, .. } => {
+                let reach = width / 2. + slop;
+                points.first().is_some_and(|&a| segment_distance(p, a, a) <= reach)
+                    || points.windows(2).any(|w| segment_distance(p, w[0], w[1]) <= reach)
             }
             Shape::Rect { area, width, .. } | Shape::Ellipse { area, width, .. } => {
                 let outer = area.grow(width / 2. + slop);
@@ -163,6 +172,22 @@ fn segment_distance(p: Pt, a: Pt, b: Pt) -> f32 {
     let t = if len2 == 0. { 0. } else { (((p.x - a.x) * dx + (p.y - a.y) * dy) / len2).clamp(0., 1.) };
     let (cx, cy) = (a.x + t * dx, a.y + t * dy);
     ((p.x - cx).powi(2) + (p.y - cy).powi(2)).sqrt()
+}
+
+fn points_bounds(points: &[Pt]) -> Area {
+    let Some(&first) = points.first() else { return Area::default() };
+    let (lo, hi) = points.iter().fold((first, first), |(lo, hi), p| (pt(lo.x.min(p.x), lo.y.min(p.y)), pt(hi.x.max(p.x), hi.y.max(p.y))));
+    Area::spanning(lo, hi)
+}
+
+/// A freehand stroke as a start point and quadratic Bézier segments (control, end). The curve runs
+/// through the midpoints between the recorded points, which smooths out the mouse's jitter.
+pub fn pen_curve(points: &[Pt]) -> Option<(Pt, Vec<(Pt, Pt)>)> {
+    let (&first, &last) = (points.first()?, points.last()?);
+    let mid = |a: Pt, b: Pt| pt((a.x + b.x) / 2., (a.y + b.y) / 2.);
+    let mut segments: Vec<(Pt, Pt)> = points.windows(2).skip(1).map(|w| (w[0], mid(w[0], w[1]))).collect();
+    segments.push((last, last));
+    Some((first, segments))
 }
 
 /// The arrow's shaft end and its filled head (tip, left, right).
@@ -384,6 +409,25 @@ pub fn draw_shape(pixmap: &mut Pixmap, base: &RgbaImage, shape: &Shape) {
                 pixmap.stroke_path(&path, &paint(*color, 1.), &stroke(*width), t, None);
             }
         }
+        Shape::Pen { points, color, width } => match points.as_slice() {
+            [dot] => {
+                if let Some(circle) = PathBuilder::from_circle(dot.x, dot.y, width / 2.) {
+                    pixmap.fill_path(&circle, &paint(*color, 1.), FillRule::Winding, t, None);
+                }
+            }
+            _ => {
+                if let Some((start, segments)) = pen_curve(points) {
+                    let mut pb = PathBuilder::new();
+                    pb.move_to(start.x, start.y);
+                    for (c, end) in segments {
+                        pb.quad_to(c.x, c.y, end.x, end.y);
+                    }
+                    if let Some(path) = pb.finish() {
+                        pixmap.stroke_path(&path, &paint(*color, 1.), &stroke(*width), t, None);
+                    }
+                }
+            }
+        },
         Shape::Rect { area, color, width } => {
             if let Some(path) = rounded_rect(*area, width * 0.9) {
                 pixmap.stroke_path(&path, &paint(*color, 1.), &stroke(*width), t, None);
@@ -510,6 +554,22 @@ mod tests {
     }
 
     #[test]
+    fn pen_strokes_and_dots_ink_their_path_only() {
+        let base = canvas();
+        let blue = PALETTE[4];
+        let ink = [blue.r, blue.g, blue.b, 255];
+        let wave = Shape::Pen { points: vec![pt(20., 60.), pt(60., 40.), pt(100., 60.), pt(140., 80.), pt(180., 60.)], color: blue, width: 6. };
+        let dot = Shape::Pen { points: vec![pt(30., 100.)], color: blue, width: 10. };
+        let out = render(&base, &Document { shapes: vec![wave.clone(), dot.clone()], crop: None });
+        assert_eq!(out.get_pixel(20, 60).0, ink, "starts at the first point");
+        assert_eq!(out.get_pixel(180, 60).0, ink, "ends at the last point");
+        assert_eq!(out.get_pixel(100, 60).0, ink, "passes through the middle");
+        assert_eq!(out.get_pixel(100, 20).0, [240, 240, 240, 255], "off the stroke untouched");
+        assert_eq!(out.get_pixel(30, 100).0, ink, "a single click leaves a dot");
+        assert!(wave.bounds().contains(pt(100., 60.)) && dot.bounds().w >= 10.);
+    }
+
+    #[test]
     fn hit_testing_lines_and_frames() {
         let line = Shape::Line { from: pt(0., 0.), to: pt(100., 0.), color: PALETTE[0], width: 4. };
         assert!(line.hit(pt(50., 3.), 2.));
@@ -517,5 +577,10 @@ mod tests {
         let rect = Shape::Rect { area: Area { x: 0., y: 0., w: 100., h: 100. }, color: PALETTE[0], width: 4. };
         assert!(rect.hit(pt(0., 50.), 3.));
         assert!(!rect.hit(pt(50., 50.), 3.), "inside of an outline is not a hit");
+        let mut pen = Shape::Pen { points: vec![pt(0., 0.), pt(50., 50.), pt(100., 0.)], color: PALETTE[0], width: 4. };
+        assert!(pen.hit(pt(75., 26.), 2.));
+        assert!(!pen.hit(pt(50., 0.), 2.), "the gap between the strokes is not a hit");
+        pen.translate(10., 0.);
+        assert!(pen.hit(pt(60., 50.), 1.));
     }
 }

@@ -49,7 +49,7 @@ pub enum Event {
 gpui_kit::assets::icon_assets!(
     ExtraIcons,
     [
-        MousePointer2, MoveUpRight, Circle, Highlighter, Type, ListOrdered, Grid3x3, Crop, Save, CloudUpload, Video,
+        MousePointer2, MoveUpRight, Pencil, Circle, Highlighter, Type, ListOrdered, Grid3x3, Crop, Save, CloudUpload, Video,
         Scissors, MicOff, CircleStop, Link, Film
     ]
 );

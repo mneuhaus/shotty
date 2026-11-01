@@ -39,6 +39,7 @@ enum Tool {
     Select,
     Arrow,
     Line,
+    Pen,
     Rect,
     Ellipse,
     Highlight,
@@ -49,10 +50,11 @@ enum Tool {
 }
 
 impl Tool {
-    const ALL: [Tool; 10] = [
+    const ALL: [Tool; 11] = [
         Tool::Select,
         Tool::Arrow,
         Tool::Line,
+        Tool::Pen,
         Tool::Rect,
         Tool::Ellipse,
         Tool::Highlight,
@@ -67,6 +69,7 @@ impl Tool {
             Tool::Select => "v",
             Tool::Arrow => "a",
             Tool::Line => "l",
+            Tool::Pen => "p",
             Tool::Rect => "r",
             Tool::Ellipse => "o",
             Tool::Highlight => "h",
@@ -82,6 +85,7 @@ impl Tool {
             Tool::Select => "Select & move",
             Tool::Arrow => "Arrow",
             Tool::Line => "Line",
+            Tool::Pen => "Pen",
             Tool::Rect => "Rectangle",
             Tool::Ellipse => "Ellipse",
             Tool::Highlight => "Highlighter",
@@ -97,6 +101,7 @@ impl Tool {
             Tool::Select => IconName::MousePointer2.into(),
             Tool::Arrow => IconName::MoveUpRight.into(),
             Tool::Line => IconName::Minus.into(),
+            Tool::Pen => IconName::Pencil.into(),
             Tool::Rect => IconName::Square.into(),
             Tool::Ellipse => IconName::Circle.into(),
             Tool::Highlight => IconName::Highlighter.into(),
@@ -113,6 +118,7 @@ const WIDTHS: [(f32, f32, f32); 3] = [(2.0, 14.0, 10.0), (3.5, 18.0, 13.0), (6.0
 
 enum Drag {
     Draw { from: Pt, to: Pt },
+    Pen { points: Vec<Pt> },
     Move { index: usize, last: Pt },
     Crop { from: Pt, to: Pt },
 }
@@ -308,6 +314,7 @@ impl Editor {
                 self.doc.shapes.push(Shape::Step { center: p, number, color: self.color, radius: self.step_radius() });
             }
             Tool::Crop => self.drag = Some(Drag::Crop { from: p, to: p }),
+            Tool::Pen => self.drag = Some(Drag::Pen { points: vec![p] }),
             _ => self.drag = Some(Drag::Draw { from: p, to: p }),
         }
         cx.notify();
@@ -325,6 +332,14 @@ impl Editor {
         }
         match &mut self.drag {
             Some(Drag::Draw { to, .. } | Drag::Crop { to, .. }) => *to = p,
+            Some(Drag::Pen { points }) => {
+                // A point every 1.5 points on screen: smooth enough, and the stroke stays small.
+                let step = 1.5 / self.view.1;
+                match points.last() {
+                    Some(last) if (p.x - last.x).hypot(p.y - last.y) < step => return,
+                    _ => points.push(p),
+                }
+            }
             Some(Drag::Move { index, last }) => {
                 let (dx, dy) = (p.x - last.x, p.y - last.y);
                 *last = p;
@@ -347,6 +362,10 @@ impl Editor {
                     self.checkpoint();
                     self.doc.shapes.push(shape);
                 }
+            }
+            Some(Drag::Pen { points }) => {
+                self.checkpoint();
+                self.doc.shapes.push(Shape::Pen { points, color: self.color, width: self.stroke() });
             }
             Some(Drag::Crop { from, to }) => {
                 let area = Area::spanning(from, to);
@@ -579,13 +598,13 @@ impl Editor {
                 .child(stat(hex(c), "Tab to copy", fg, muted))
         });
         let mut readouts = h_flex().gap(px(14.)).pr(px(16.));
-        if width > 1040. && let Some(color) = color {
+        if width > 1080. && let Some(color) = color {
             readouts = readouts.child(color).child(divider());
         }
-        if width > 900. {
+        if width > 940. {
             readouts = readouts.child(size).child(divider());
         }
-        if width > 760. {
+        if width > 800. {
             readouts = readouts.child(stat(format!("{}%", (zoom * 100.).round()), "Zoom", fg, muted));
         }
 
@@ -837,6 +856,11 @@ fn demo_doc(d: f32) -> Document {
         shapes: vec![
             Shape::Pixelate { area: Area { x: 20. * d, y: 60. * d, w: 180. * d, h: 60. * d } },
             Shape::Arrow { from: pt(450. * d, 350. * d), to: pt(650. * d, 210. * d), color: c[0], width: 3.5 * d },
+            Shape::Pen {
+                points: (0..=40).map(|i| i as f32 / 40.).map(|t| pt((820. + 140. * t) * d, (420. + 30. * (t * 9.).sin()) * d)).collect(),
+                color: c[3],
+                width: 3.5 * d,
+            },
             Shape::Rect { area: Area { x: 660. * d, y: 150. * d, w: 300. * d, h: 110. * d }, color: c[0], width: 3.5 * d },
             Shape::Ellipse { area: Area { x: 100. * d, y: 400. * d, w: 250. * d, h: 130. * d }, color: c[4], width: 3.5 * d },
             Shape::Highlight { area: Area { x: 450. * d, y: 450. * d, w: 350. * d, h: 30. * d }, color: c[2] },
@@ -861,6 +885,13 @@ fn hsla_of(c: Color, alpha: f32) -> Hsla {
     h
 }
 
+/// A stroke with round caps and joins like the export's; GPUI's default is butt caps and miters.
+fn round_stroke(width: f32) -> PathBuilder {
+    use lyon::tessellation::{LineCap, LineJoin};
+    let options = StrokeOptions::default().with_line_width(width).with_line_cap(LineCap::Round).with_line_join(LineJoin::Round);
+    PathBuilder::stroke(px(width)).with_style(PathStyle::Stroke(options))
+}
+
 /// Paints strokes and fills for the geometric shapes; `k` maps image pixels to points.
 fn paint_shapes(shapes: &[Shape], origin: Point<Pixels>, k: f32, window: &mut Window) {
     let at = |p: Pt| point(origin.x + px(p.x * k), origin.y + px(p.y * k));
@@ -868,7 +899,7 @@ fn paint_shapes(shapes: &[Shape], origin: Point<Pixels>, k: f32, window: &mut Wi
         match shape {
             Shape::Arrow { from, to, color, width } => {
                 let (shaft_end, head) = ann::arrow_head(*from, *to, *width);
-                let mut b = PathBuilder::stroke(px(width * k));
+                let mut b = round_stroke(width * k);
                 b.move_to(at(*from));
                 b.line_to(at(shaft_end));
                 if let Ok(path) = b.build() {
@@ -884,13 +915,32 @@ fn paint_shapes(shapes: &[Shape], origin: Point<Pixels>, k: f32, window: &mut Wi
                 }
             }
             Shape::Line { from, to, color, width } => {
-                let mut b = PathBuilder::stroke(px(width * k));
+                let mut b = round_stroke(width * k);
                 b.move_to(at(*from));
                 b.line_to(at(*to));
                 if let Ok(path) = b.build() {
                     window.paint_path(path, hsla_of(*color, 1.));
                 }
             }
+            Shape::Pen { points, color, width } => match points.as_slice() {
+                [dot] => {
+                    let (c, r) = (at(*dot), width / 2. * k);
+                    let bounds = Bounds::new(point(c.x - px(r), c.y - px(r)), size(px(r * 2.), px(r * 2.)));
+                    window.paint_quad(quad(bounds, px(r), hsla_of(*color, 1.), px(0.), transparent_black(), BorderStyle::Solid));
+                }
+                _ => {
+                    if let Some((start, segments)) = ann::pen_curve(points) {
+                        let mut b = round_stroke(width * k);
+                        b.move_to(at(start));
+                        for (c, end) in segments {
+                            b.curve_to(at(end), at(c));
+                        }
+                        if let Ok(path) = b.build() {
+                            window.paint_path(path, hsla_of(*color, 1.));
+                        }
+                    }
+                }
+            },
             Shape::Rect { area, color, width } => {
                 let outer = area.grow(width / 2.);
                 let bounds = Bounds::new(at(pt(outer.x, outer.y)), size(px(outer.w * k), px(outer.h * k)));
@@ -943,6 +993,7 @@ impl Render for Editor {
         let mut crop = self.doc.crop;
         match &self.drag {
             Some(Drag::Draw { from, to }) => shapes.extend(self.shape_for(*from, *to)),
+            Some(Drag::Pen { points }) => shapes.push(Shape::Pen { points: points.clone(), color: self.color, width: self.stroke() }),
             Some(Drag::Crop { from, to }) => crop = Some(Area::spanning(*from, *to)),
             _ => {}
         }
@@ -957,6 +1008,8 @@ impl Render for Editor {
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
+            // A drag that ends over the toolbar (or outside the window) still finishes its shape.
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
             .child(
                 img(ImageSource::Render(self.picture.clone()))
                     .absolute()
@@ -1064,7 +1117,7 @@ pub fn open(image: Arc<RgbaImage>, path: PathBuf, density: f32, cx: &mut App) {
                 traffic_light_position: Some(point(px(18.), px(21.))),
             }),
             // Below this the tools don't fit the toolbar.
-            window_min_size: Some(size(px(680.), px(260.))),
+            window_min_size: Some(size(px(720.), px(260.))),
             // Demo windows must not take the keyboard from whoever is working.
             focus: !demo,
             ..Default::default()
